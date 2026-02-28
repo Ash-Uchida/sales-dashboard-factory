@@ -123,6 +123,8 @@ INSERT INTO workspace.sales.products VALUES
 - Core charts: Revenue trend, Revenue by region, Product mix
 - Filters: Date range and region
 - Conversational analytics: question -> SQL -> validate -> execute/render
+  - Default mode is demo-safe result rendering for stability
+  - Live Databricks execution is opt-in via `CHAT_EXECUTION_MODE=databricks`
 - SQL guardrails:
   - SELECT-only
   - Approved table allowlist
@@ -136,6 +138,7 @@ INSERT INTO workspace.sales.products VALUES
   - generated SQL
   - status (`RECEIVED`, `SUCCESS`, `BLOCKED`, `ERROR`)
   - outcome
+  - audit log view is restricted to `Data Analyst` and `IT Admin`
 
 ## Validator Test Cases
 Use these to verify behavior quickly:
