@@ -10,19 +10,20 @@
 -- ============================================================
 
 -- ------------------------------------------------------------
--- 1. AUTH_VIEW (works with 5-column users: user_id, firstname, lastname, username, password_hash)
---    Run this so the app can load user info after login. No role_id/store_id needed.
+-- 1. AUTH_VIEW (users JOIN roles so role_name comes from chosen role_id)
+--    Run this so the app shows the correct role after login.
 -- ------------------------------------------------------------
 
 CREATE OR REPLACE VIEW workspace.admin.auth_view AS
 SELECT
-  user_id,
-  username,
-  firstname,
-  lastname,
-  'Business User' AS role_name,
-  CAST(NULL AS STRING) AS store_id
-FROM workspace.admin.users;
+  u.user_id,
+  u.username,
+  u.firstname,
+  u.lastname,
+  r.role_name AS role_name,
+  u.store_id
+FROM workspace.admin.users u
+LEFT JOIN workspace.admin.roles r ON u.role_id = r.role_id;
 
 
 -- ------------------------------------------------------------
