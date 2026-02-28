@@ -9,6 +9,8 @@ import plotly.express as px
 import streamlit as st
 from dotenv import load_dotenv
 
+from components.auth import can_access, get_current_role, get_current_user, logout, require_login
+
 try:
     from databricks import sql as dbsql
 except Exception:
@@ -364,6 +366,8 @@ def log_event(
 
 def main() -> None:
     st.set_page_config(page_title="Sales Dashboard Factory", layout="wide")
+    require_login()
+
     st.title("Sales Dashboard Factory")
     st.caption(
         "Governed data app template with KPI dashboard + natural language analytics. "
@@ -374,6 +378,8 @@ def main() -> None:
         st.session_state["audit_logs"] = []
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
+
+    role = get_current_role()
 
     with st.sidebar:
         st.subheader("Access Context")
@@ -393,7 +399,10 @@ def main() -> None:
             """,
             unsafe_allow_html=True,
         )
-        role = st.selectbox("Role", ["Business User", "Data Analyst", "IT Admin"])
+        user = get_current_user()
+        st.info(f"**{user}** · {role}")
+        if st.button("Log out"):
+            logout()
         if "view_mode" not in st.session_state:
             st.session_state["view_mode"] = "Dashboard"
         st.caption("View")
@@ -404,7 +413,7 @@ def main() -> None:
         view = st.session_state["view_mode"]
         st.caption(f"Current: {view}")
         mode = "Databricks SQL" if databricks_configured() else "Demo Data (no Databricks env configured)"
-        st.info(f"Execution Mode: {mode}")
+        st.caption(f"Execution: {mode}")
 
     if view == "Audit Log":
         st.subheader("Audit Log")
@@ -585,6 +594,16 @@ Generated SQL:
                 "ERROR",
                 "malformed output or execution failure",
             )
+    if can_access("audit_log"):
+        with st.expander("Audit Log"):
+            logs = pd.DataFrame(st.session_state.audit_logs)
+            if logs.empty:
+                st.write("No queries logged yet.")
+            else:
+                st.dataframe(logs, use_container_width=True)
+    else:
+        st.caption("Audit log is available to Data Analyst and IT Admin roles only.")
+
     st.markdown("---")
     st.markdown(
         "**Demo message**: This empowers non-technical users while maintaining IT oversight. "
