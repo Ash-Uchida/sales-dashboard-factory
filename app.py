@@ -24,6 +24,7 @@ except Exception:
 
 load_dotenv()
 
+# Validator compares lowercased table refs; include both forms.
 APPROVED_TABLES = {
     "transactions",
     "customers",
@@ -34,6 +35,10 @@ APPROVED_TABLES = {
     "workspace.sales.transactions",
     "workspace.sales.customers",
     "workspace.sales.products",
+    *(s.lower() for s in (
+        "main.sales.transactions", "main.sales.customers", "main.sales.products",
+        "workspace.sales.transactions", "workspace.sales.customers", "workspace.sales.products",
+    )),
 }
 
 BLOCKED_SQL_PATTERNS = [
@@ -153,6 +158,62 @@ def execute_databricks_query(query: str, timeout_seconds: int = 25) -> pd.DataFr
 
 def normalize_sql(query: str) -> str:
     return re.sub(r"\s+", " ", query).strip()
+
+
+def _transactions_table() -> str:
+    """Fully qualified transactions table from env."""
+    catalog = os.getenv("DATABRICKS_CATALOG", "workspace")
+    schema = os.getenv("DATABRICKS_SCHEMA", "sales")
+    return f"{catalog}.{schema}.transactions"
+
+
+@st.cache_data(ttl=120)
+def get_databricks_date_range() -> Tuple[Optional[datetime], Optional[datetime]]:
+    """Return (min_date, max_date) from transactions in Databricks. Returns (None, None) if empty or error."""
+    try:
+        table = _transactions_table()
+        df = execute_databricks_query(
+            f"SELECT MIN(order_date) AS min_d, MAX(order_date) AS max_d FROM {table}"
+        )
+        if df.empty or pd.isna(df.at[0, "min_d"]) or pd.isna(df.at[0, "max_d"]):
+            return None, None
+        min_d, max_d = df.at[0, "min_d"], df.at[0, "max_d"]
+        if hasattr(min_d, "date"):
+            min_d, max_d = min_d.date(), max_d.date()
+        return min_d, max_d
+    except Exception:
+        return None, None
+
+
+@st.cache_data(ttl=120)
+def get_databricks_regions() -> List[str]:
+    """Return ['All'] + distinct regions from transactions in Databricks."""
+    try:
+        table = _transactions_table()
+        df = execute_databricks_query(
+            f"SELECT DISTINCT region FROM {table} ORDER BY region"
+        )
+        if df.empty or "region" not in df.columns:
+            return ["All"]
+        regions = ["All"] + df["region"].astype(str).str.strip().tolist()
+        return regions
+    except Exception:
+        return ["All", "West", "East", "North", "South"]
+
+
+def load_dashboard_data_from_databricks(
+    start_date: datetime,
+    end_date: datetime,
+    region: str,
+) -> pd.DataFrame:
+    """Load transactions from Databricks with date and optional region filter."""
+    table = _transactions_table()
+    s, e = start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
+    where = f"order_date BETWEEN CAST('{s}' AS DATE) AND CAST('{e}' AS DATE)"
+    if region and region != "All":
+        where += f" AND region = '{region}'"
+    query = f"SELECT * FROM {table} WHERE {where} LIMIT {DEFAULT_LIMIT}"
+    return execute_databricks_query(query)
 
 
 def extract_table_references(query: str) -> List[str]:
@@ -600,9 +661,22 @@ def main() -> None:
             st.dataframe(logs, use_container_width=True)
         return
 
-    demo_df = load_demo_data()
-    min_date = demo_df["order_date"].min().date()
-    max_date = demo_df["order_date"].max().date()
+    # Dashboard data: Databricks when configured, else demo data
+    if databricks_configured():
+        db_min, db_max = get_databricks_date_range()
+        if db_min is not None and db_max is not None:
+            min_date, max_date = db_min, db_max
+        else:
+            from datetime import date, timedelta
+            today = date.today()
+            min_date = today - timedelta(days=365)
+            max_date = today
+        region_options = get_databricks_regions()
+    else:
+        demo_df = load_demo_data()
+        min_date = demo_df["order_date"].min().date()
+        max_date = demo_df["order_date"].max().date()
+        region_options = ["All", "West", "East", "North", "South"]
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -610,14 +684,25 @@ def main() -> None:
     with c2:
         end_date = st.date_input("End Date", max_date)
     with c3:
-        selected_region = st.selectbox("Region", ["All", "West", "East", "North", "South"])
+        selected_region = st.selectbox("Region", region_options)
 
-    filtered_df = apply_filters(
-        demo_df,
-        pd.to_datetime(start_date),
-        pd.to_datetime(end_date),
-        selected_region,
-    )
+    if databricks_configured():
+        try:
+            filtered_df = load_dashboard_data_from_databricks(
+                pd.to_datetime(start_date),
+                pd.to_datetime(end_date),
+                selected_region,
+            )
+        except Exception as e:
+            st.error(f"Could not load data from Databricks: {e}")
+            filtered_df = pd.DataFrame()
+    else:
+        filtered_df = apply_filters(
+            load_demo_data(),
+            pd.to_datetime(start_date),
+            pd.to_datetime(end_date),
+            selected_region,
+        )
 
     st.subheader("KPI Dashboard")
     render_kpis(filtered_df)
