@@ -4,7 +4,9 @@
 ## 1. Purpose
 This document defines standards, guardrails, and governance controls for building Sales Dashboard applications in the Sales Dashboard Factory.
 
-Goal: empower non-technical users to analyze business performance while preserving security, compliance, and IT oversight through governed Databricks data access.
+**Problem:** Store managers and merchandisers need same-day answers from governed sales data without writing SQL or exceeding their access. Report backlogs and shadow spreadsheets slow decisions and create compliance risk.
+
+**Goal:** Empower non-technical users to analyze business performance while preserving security, compliance, and IT oversight through governed Databricks data access.
 
 ## 2. Approved Data Sources
 All applications must query governed Unity Catalog assets only.
