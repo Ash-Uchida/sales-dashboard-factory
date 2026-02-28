@@ -164,6 +164,20 @@ def validate_sql(query: str, role: str, selected_region: str) -> Tuple[bool, str
     return True, "SQL validated. Added default row limit.", sanitized
 
 
+def clean_sql_output(text: str) -> str:
+    raw = text.strip()
+    code_match = re.search(r"```sql\s*(.*?)\s*```", raw, flags=re.IGNORECASE | re.DOTALL)
+    sql = (code_match.group(1) if code_match else raw).strip()
+    sql = re.sub(r"^\s*sql\s*:\s*", "", sql, flags=re.IGNORECASE)
+    sql = sql.strip("`").strip()
+
+    if not re.match(r"^(select|with)\b", sql, flags=re.IGNORECASE):
+        raise ValueError("Model returned non-SQL output; expected SELECT/WITH query.")
+    if ";" in sql[:-1]:
+        raise ValueError("Model returned multiple SQL statements; only one is allowed.")
+    return sql
+
+
 def llm_to_sql(question: str, selected_region: str) -> str:
     catalog = os.getenv("DATABRICKS_CATALOG", "main")
     schema = os.getenv("DATABRICKS_SCHEMA", "sales")
@@ -195,7 +209,15 @@ Rules:
 - Prefer simple, readable SQL.
 - Respect selected region context:
 {selected_region_rule}
-- If the question is ambiguous, return a safe aggregate query from transactions.
+- If the question is ambiguous, return this exact safe query pattern:
+  SELECT DATE(order_date) AS day, SUM(revenue) AS total_revenue
+  FROM workspace.sales.transactions
+  WHERE 1=1
+  GROUP BY DATE(order_date)
+  ORDER BY day DESC
+  LIMIT 1000
+- If user asks "last month", filter to previous calendar month.
+- If user asks "average", return AVG(revenue) AS avg_order_value.
 
 User question:
 {question}
@@ -207,11 +229,21 @@ User question:
             temperature=0,
         )
         text = response.output_text.strip()
-        code_match = re.search(r"```sql\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
-        return (code_match.group(1).strip() if code_match else text).rstrip(";")
+        candidate_sql = clean_sql_output(text)
+        return candidate_sql.rstrip(";")
 
     q = question.lower()
     base = f"{catalog}.{schema}.transactions"
+    is_last_month = "last month" in q or "last months" in q
+    is_average = "average" in q or "avg" in q or "mean" in q
+
+    if is_average and is_last_month:
+        return (
+            "SELECT AVG(revenue) AS avg_order_value "
+            f"FROM {base} "
+            "WHERE DATE_TRUNC('month', order_date) = DATE_TRUNC('month', ADD_MONTHS(CURRENT_DATE(), -1))"
+            f"{region_filter} LIMIT 1"
+        )
 
     if "top" in q and "product" in q:
         return (
@@ -227,7 +259,7 @@ User question:
             "GROUP BY DATE(order_date) ORDER BY day LIMIT 1000"
         )
 
-    if "average" in q or "aov" in q:
+    if is_average or "aov" in q:
         return (
             "SELECT AVG(revenue) AS avg_order_value "
             f"FROM {base} WHERE 1=1{region_filter} LIMIT 1"
@@ -310,17 +342,26 @@ def render_charts(df: pd.DataFrame) -> None:
     st.plotly_chart(fig_pie, use_container_width=True)
 
 
-def log_event(logs: List[Dict[str, Any]], role: str, question: str, sql: str, status: str) -> None:
-    logs.insert(
-        0,
-        {
-            "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            "role": role,
-            "question": question,
-            "sql": sql,
-            "status": status,
-        },
-    )
+def log_event(
+    role: str,
+    question: str,
+    sql: str,
+    status: str,
+    outcome: str,
+) -> None:
+    entry = {
+        "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "role": role,
+        "question": question,
+        "sql": sql,
+        "status": status,
+        "outcome": outcome,
+    }
+    logs = st.session_state.setdefault("audit_logs", [])
+    logs.insert(0, entry)
+    st.session_state["audit_logs"] = logs
+    st.session_state["last_audit_status"] = f"{status}: {outcome}"
+    print(f"[AUDIT] {entry['timestamp']} status={status} outcome={outcome} question={question}")
 
 
 def main() -> None:
@@ -334,7 +375,7 @@ def main() -> None:
     )
 
     if "audit_logs" not in st.session_state:
-        st.session_state.audit_logs = []
+        st.session_state["audit_logs"] = []
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
@@ -342,12 +383,48 @@ def main() -> None:
 
     with st.sidebar:
         st.subheader("Access Context")
+        st.markdown(
+            """
+            <style>
+            [data-testid="stSidebar"] div.stButton > button {
+                border: none;
+                border-radius: 0;
+                margin: 0;
+                box-shadow: none;
+            }
+            [data-testid="stSidebar"] div.stButton {
+                margin: 0;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
         user = get_current_user()
         st.info(f"**{user}** · {role}")
         if st.button("Log out"):
             logout()
+        if "view_mode" not in st.session_state:
+            st.session_state["view_mode"] = "Dashboard"
+        st.caption("View")
+        if st.button("Dashboard", use_container_width=True):
+            st.session_state["view_mode"] = "Dashboard"
+        if st.button("Audit Log", use_container_width=True):
+            st.session_state["view_mode"] = "Audit Log"
+        view = st.session_state["view_mode"]
+        st.caption(f"Current: {view}")
         mode = "Databricks SQL" if databricks_configured() else "Demo Data (no Databricks env configured)"
         st.caption(f"Execution: {mode}")
+
+    if view == "Audit Log":
+        st.subheader("Audit Log")
+        logs = pd.DataFrame(st.session_state.get("audit_logs", []))
+        st.caption(f"Entries: {len(logs)}")
+        st.caption(f"Last status: {st.session_state.get('last_audit_status', 'none')}")
+        if logs.empty:
+            st.info("No queries logged yet.")
+        else:
+            st.dataframe(logs, use_container_width=True)
+        return
 
     demo_df = load_demo_data()
     min_date = demo_df["order_date"].min().date()
@@ -401,35 +478,122 @@ def main() -> None:
         """)
 
     st.subheader("Conversational Analytics")
+    if st.button("Clear Chat"):
+        st.session_state.chat_history = []
+        st.rerun()
+
     for msg in st.session_state.chat_history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
     user_question = st.chat_input("Ask about sales...")
     if user_question:
-        st.session_state.chat_history.append({"role": "user", "content": user_question})
+        cleaned = user_question.strip()
+        if cleaned in {"", '""', "''"}:
+            st.warning("Please enter a real question.")
+            return
+
+        st.session_state.chat_history.append({"role": "user", "content": cleaned})
         with st.chat_message("user"):
-            st.markdown(user_question)
+            st.markdown(cleaned)
+        before_count = len(st.session_state["audit_logs"])
+        log_event(
+            role,
+            cleaned,
+            "N/A",
+            "RECEIVED",
+            "question_received",
+        )
+        after_count = len(st.session_state["audit_logs"])
+        st.session_state["last_audit_status"] = f"RECEIVED debug: {before_count}->{after_count}"
 
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                time.sleep(2)
+        try:
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking..."):
+                    time.sleep(1.2)
 
-        placeholder_text = "I can help with sales trends, regions, top products, and KPIs. Generating SQL..."
-        st.session_state.chat_history.append({"role": "assistant", "content": placeholder_text})
-        with st.chat_message("assistant"):
-            st.markdown(placeholder_text)
+            # Question -> SQL
+            generated_sql = llm_to_sql(cleaned, selected_region)
 
-        # Stub only for Hour 1: generate SQL and display it without execution.
-        generated_sql = llm_to_sql(user_question, selected_region)
-        assistant_text = f"""Stub SQL generated:
+            # SQL -> Validate
+            ok, message, safe_sql = validate_sql(generated_sql, role, selected_region)
+            if not ok:
+                blocked_text = f"""I blocked this query for safety.
+
+Reason: {message}
+
+Generated SQL:
 ```sql
 {generated_sql}
 ```"""
-        st.session_state.chat_history.append({"role": "assistant", "content": assistant_text})
-        with st.chat_message("assistant"):
-            st.markdown(assistant_text)
+                st.session_state.chat_history.append({"role": "assistant", "content": blocked_text})
+                with st.chat_message("assistant"):
+                    st.warning(f"I blocked this query for safety: {message}")
+                    st.markdown(f"```sql\n{generated_sql}\n```")
+                log_event(
+                    role,
+                    cleaned,
+                    generated_sql,
+                    "BLOCKED",
+                    message,
+                )
+            else:
+                assistant_text = f"""I can help with sales trends, regions, top products, and KPIs.
 
+Generated SQL:
+```sql
+{safe_sql}
+```"""
+                st.session_state.chat_history.append({"role": "assistant", "content": assistant_text})
+                with st.chat_message("assistant"):
+                    st.markdown(assistant_text)
+
+                # Validate -> Execute
+                if databricks_configured():
+                    result_df = execute_databricks_query(safe_sql)
+                else:
+                    result_df = filtered_df.head(200)
+
+                # Execute -> UI
+                with st.chat_message("assistant"):
+                    st.markdown("Query results:")
+                    st.dataframe(result_df, use_container_width=True)
+
+                    # Optional chart when result shape is chart-compatible.
+                    numeric_cols = result_df.select_dtypes(include="number").columns
+                    non_numeric_cols = [c for c in result_df.columns if c not in numeric_cols]
+                    if len(numeric_cols) >= 1 and len(non_numeric_cols) >= 1:
+                        fig = px.bar(
+                            result_df.head(20),
+                            x=non_numeric_cols[0],
+                            y=numeric_cols[0],
+                            title="Query Result Snapshot",
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                log_event(
+                    role,
+                    cleaned,
+                    safe_sql,
+                    "SUCCESS",
+                    f"rows_returned={len(result_df)}",
+                )
+        except Exception as e:
+            error_text = (
+                "I couldn't process that request safely right now. "
+                "Please rephrase your question and try again."
+            )
+            st.session_state.chat_history.append({"role": "assistant", "content": error_text})
+            with st.chat_message("assistant"):
+                st.error(error_text)
+                st.caption(f"Debug detail: {e}")
+            log_event(
+                role,
+                cleaned,
+                "N/A",
+                "ERROR",
+                "malformed output or execution failure",
+            )
     if can_access("audit_log"):
         with st.expander("Audit Log"):
             logs = pd.DataFrame(st.session_state.audit_logs)
