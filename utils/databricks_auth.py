@@ -143,6 +143,27 @@ def check_password(username: str, password: str) -> bool:
         return False
 
 
+def list_users() -> List[Dict[str, Any]]:
+    """
+    List all users from auth_view (no password_hash). For IT Admin user management only.
+    Returns list of {user_id, username, firstname, lastname, role, store_id}.
+    """
+    if not databricks_auth_configured():
+        return []
+    try:
+        q = f"""
+        SELECT user_id, username, firstname, lastname, role_name AS role, store_id
+        FROM {_ADMIN_CATALOG}.{_ADMIN_SCHEMA}.auth_view
+        ORDER BY username
+        """
+        df = _run_query_df(q)
+        if df.empty:
+            return []
+        return df.to_dict("records")
+    except Exception:
+        return []
+
+
 def get_user_after_login(username: str):
     """
     Return user info for session (no password_hash). Requires auth_view with
@@ -161,7 +182,11 @@ def get_user_after_login(username: str):
         df = _run_query_df(q)
         if df.empty:
             return None
-        return df.iloc[0].to_dict()
+        row = df.iloc[0].to_dict()
+        # If auth_view uses JOIN and user has no role_id, role_name can be null; default to Business User
+        if not row.get("role"):
+            row["role"] = "Business User"
+        return row
     except Exception:
         return None
 
@@ -194,14 +219,13 @@ def register_user(
     pwd_hash = hash_password(password)
     safe = lambda s: (s or "").replace("'", "''")
     firstname_s, lastname_s = safe(firstname), safe(lastname)
-    username_s = safe(username)
-    # Insert only columns that exist: user_id, firstname, lastname, username, password_hash.
-    # If your table has role_id, store_id, created_at, add them in Databricks and we can extend the INSERT.
+    username_s, role_id_s = safe(username), safe(role_id)
+    store_id_s = f"'{safe(store_id)}'" if store_id else "NULL"
     q = f"""
     INSERT INTO {_ADMIN_CATALOG}.{_ADMIN_SCHEMA}.users
-    (user_id, firstname, lastname, username, password_hash)
+    (user_id, firstname, lastname, username, password_hash, role_id, store_id, created_at)
     VALUES
-    ('{user_id}', '{firstname_s}', '{lastname_s}', '{username_s}', '{pwd_hash}')
+    ('{user_id}', '{firstname_s}', '{lastname_s}', '{username_s}', '{pwd_hash}', '{role_id_s}', {store_id_s}, current_timestamp())
     """
     try:
         conn = _conn()

@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -11,6 +12,11 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from components.auth import can_access, get_current_role, get_current_user, logout, require_login
+
+try:
+    from utils import databricks_auth as db_auth
+except Exception:
+    db_auth = None
 
 try:
     from databricks import sql as dbsql
@@ -63,6 +69,11 @@ ROLE_ALLOWED_TABLES = {
         "main.sales.transactions",
         "workspace.sales.transactions",
     },
+    "Manager": {
+        "transactions",
+        "main.sales.transactions",
+        "workspace.sales.transactions",
+    },
     "Data Analyst": {
         "transactions",
         "customers",
@@ -79,6 +90,7 @@ ROLE_ALLOWED_TABLES = {
 
 ROLE_MAX_LIMIT = {
     "Business User": 1000,
+    "Manager": 1000,
     "Data Analyst": 100000,
     "IT Admin": 100000,
 }
@@ -87,22 +99,22 @@ ROLE_MAX_LIMIT = {
 @st.cache_data
 def load_demo_data() -> pd.DataFrame:
     dates = pd.date_range("2025-01-01", periods=240, freq="D")
-    regions = ["West", "East", "North", "South"]
+    stores = [("S1", "Store West"), ("S2", "Store East"), ("S3", "Store North"), ("S4", "Store South")]
     products = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]
 
     rows = []
     order_id = 1000
     for i, day in enumerate(dates):
-        for region in regions:
+        for store_id, _ in stores:
             for p in products:
-                qty = 5 + ((i + len(region) + len(p)) % 18)
+                qty = 5 + ((i + len(store_id) + len(p)) % 18)
                 unit_price = 40 + (len(p) * 6)
                 revenue = qty * unit_price
                 rows.append(
                     {
                         "order_id": order_id,
                         "order_date": day,
-                        "region": region,
+                        "store_id": store_id,
                         "product_name": p,
                         "quantity": qty,
                         "unit_price": unit_price,
@@ -156,15 +168,134 @@ def execute_databricks_query(query: str, timeout_seconds: int = 25) -> pd.DataFr
         pool.shutdown(wait=False, cancel_futures=True)
 
 
+def execute_databricks_statement(query: str, timeout_seconds: int = 25) -> None:
+    """Run INSERT/UPDATE etc.; no result set returned."""
+    def _run() -> None:
+        conn = dbsql.connect(
+            server_hostname=os.environ["DATABRICKS_SERVER_HOSTNAME"],
+            http_path=os.environ["DATABRICKS_HTTP_PATH"],
+            access_token=os.environ["DATABRICKS_TOKEN"],
+        )
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(query)
+        finally:
+            conn.close()
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(_run)
+    try:
+        future.result(timeout=timeout_seconds)
+    except Exception:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _escape(s: str) -> str:
+    return (s or "").replace("'", "''")
+
+
+def insert_transaction(
+    order_id: str,
+    order_date: str,
+    store_id: str,
+    product_name: str,
+    quantity: int,
+    unit_price: float,
+    customer_id: str,
+) -> Tuple[bool, Optional[str]]:
+    """Insert one row into workspace.sales.transactions. revenue = quantity * unit_price."""
+    if not databricks_configured():
+        return False, "Databricks not configured."
+    revenue = quantity * unit_price
+    table = _transactions_table()
+    q = (
+        f"INSERT INTO {table} (order_id, order_date, store_id, product_name, quantity, unit_price, revenue, customer_id) "
+        f"VALUES ('{_escape(order_id)}', CAST('{order_date}' AS DATE), '{_escape(store_id)}', "
+        f"'{_escape(product_name)}', {int(quantity)}, {float(unit_price)}, {float(revenue)}, '{_escape(customer_id)}')"
+    )
+    try:
+        execute_databricks_statement(q)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def insert_customer(customer_id: str, customer_name: str, segment: str, store_id: str) -> Tuple[bool, Optional[str]]:
+    """Insert one row into workspace.sales.customers."""
+    if not databricks_configured():
+        return False, "Databricks not configured."
+    table = _sales_table("customers")
+    q = (
+        f"INSERT INTO {table} (customer_id, customer_name, segment, store_id) "
+        f"VALUES ('{_escape(customer_id)}', '{_escape(customer_name)}', '{_escape(segment)}', '{_escape(store_id)}')"
+    )
+    try:
+        execute_databricks_statement(q)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def insert_product(
+    product_id: str,
+    product_name: str,
+    product_price: float,
+    category: str,
+) -> Tuple[bool, Optional[str]]:
+    """Insert one row into workspace.sales.products (product_id, product_name, product_price, category)."""
+    if not databricks_configured():
+        return False, "Databricks not configured."
+    table = _sales_table("products")
+    q = (
+        f"INSERT INTO {table} (product_id, product_name, product_price, category) "
+        f"VALUES ('{_escape(product_id)}', '{_escape(product_name)}', {float(product_price)}, '{_escape(category)}')"
+    )
+    try:
+        execute_databricks_statement(q)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def insert_store(store_id: str, store_name: str, location: str) -> Tuple[bool, Optional[str]]:
+    """Insert one row into workspace.admin.stores (Manager-only in app; Databricks can restrict table too)."""
+    if not databricks_configured():
+        return False, "Databricks not configured."
+    table = _admin_table("stores")
+    q = (
+        f"INSERT INTO {table} (store_id, store_name, location, user_id, created_at) "
+        f"VALUES ('{_escape(store_id)}', '{_escape(store_name)}', '{_escape(location)}', NULL, CURRENT_TIMESTAMP)"
+    )
+    try:
+        execute_databricks_statement(q)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
 def normalize_sql(query: str) -> str:
     return re.sub(r"\s+", " ", query).strip()
 
 
-def _transactions_table() -> str:
-    """Fully qualified transactions table from env."""
+def _sales_table(name: str) -> str:
+    """Fully qualified sales table from env (e.g. transactions, customers, products)."""
     catalog = os.getenv("DATABRICKS_CATALOG", "workspace")
     schema = os.getenv("DATABRICKS_SCHEMA", "sales")
-    return f"{catalog}.{schema}.transactions"
+    return f"{catalog}.{schema}.{name}"
+
+
+def _transactions_table() -> str:
+    return _sales_table("transactions")
+
+
+def _admin_table(name: str) -> str:
+    """Fully qualified admin table (e.g. stores) from env."""
+    catalog = os.getenv("DATABRICKS_CATALOG", "workspace")
+    schema = os.getenv("DATABRICKS_SCHEMA_ADMIN", "admin")
+    return f"{catalog}.{schema}.{name}"
 
 
 @st.cache_data(ttl=120)
@@ -185,9 +316,54 @@ def get_databricks_date_range() -> Tuple[Optional[datetime], Optional[datetime]]
         return None, None
 
 
+@st.cache_data(ttl=60)
+def get_databricks_products() -> List[Dict[str, Any]]:
+    """Return list of {product_id, product_name, product_price, category} from workspace.sales.products."""
+    if not databricks_configured():
+        return []
+    try:
+        table = _sales_table("products")
+        df = execute_databricks_query(
+            f"SELECT product_id, product_name, product_price, category FROM {table} ORDER BY product_name"
+        )
+        if df.empty:
+            return []
+        df["product_price"] = pd.to_numeric(df["product_price"], errors="coerce").fillna(0.0)
+        return df.to_dict("records")
+    except Exception:
+        return []
+
+
+def get_databricks_stores() -> List[Tuple[str, str]]:
+    """Return [(store_id, store_name), ...] for filter dropdown; first entry is ('All', 'All')."""
+    out = [("All", "All")]
+    if not databricks_configured():
+        return out + [("S1", "Store West"), ("S2", "Store East"), ("S3", "Store North"), ("S4", "Store South")]
+    try:
+        if db_auth and db_auth.databricks_auth_configured():
+            stores = db_auth.get_stores()
+            if stores:
+                for s in stores:
+                    out.append((str(s.get("store_id", "")), str(s.get("store_name", s.get("store_id", "?")))))
+                return out
+        table = _transactions_table()
+        df = execute_databricks_query(
+            f"SELECT DISTINCT store_id FROM {table} WHERE store_id IS NOT NULL ORDER BY store_id"
+        )
+        if not df.empty and "store_id" in df.columns:
+            for sid in df["store_id"].astype(str).str.strip():
+                if sid and sid != "None":
+                    out.append((sid, sid))
+    except Exception:
+        pass
+    if len(out) == 1:
+        out += [("S1", "Store 1"), ("S2", "Store 2")]
+    return out
+
+
 @st.cache_data(ttl=120)
 def get_databricks_regions() -> List[str]:
-    """Return ['All'] + distinct regions from transactions in Databricks."""
+    """Return ['All'] + distinct regions from transactions (legacy). Prefer get_databricks_stores()."""
     try:
         table = _transactions_table()
         df = execute_databricks_query(
@@ -195,8 +371,7 @@ def get_databricks_regions() -> List[str]:
         )
         if df.empty or "region" not in df.columns:
             return ["All"]
-        regions = ["All"] + df["region"].astype(str).str.strip().tolist()
-        return regions
+        return ["All"] + df["region"].astype(str).str.strip().tolist()
     except Exception:
         return ["All", "West", "East", "North", "South"]
 
@@ -204,14 +379,15 @@ def get_databricks_regions() -> List[str]:
 def load_dashboard_data_from_databricks(
     start_date: datetime,
     end_date: datetime,
-    region: str,
+    selected_store_id: str,
 ) -> pd.DataFrame:
-    """Load transactions from Databricks with date and optional region filter."""
+    """Load transactions from Databricks with date and optional store filter."""
     table = _transactions_table()
     s, e = start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
     where = f"order_date BETWEEN CAST('{s}' AS DATE) AND CAST('{e}' AS DATE)"
-    if region and region != "All":
-        where += f" AND region = '{region}'"
+    if selected_store_id and selected_store_id != "All":
+        safe_id = str(selected_store_id).replace("'", "''")
+        where += f" AND store_id = '{safe_id}'"
     query = f"SELECT * FROM {table} WHERE {where} LIMIT {DEFAULT_LIMIT}"
     return execute_databricks_query(query)
 
@@ -236,7 +412,7 @@ def is_single_statement(query: str) -> bool:
     return True
 
 
-def validate_sql(query: str, role: str, selected_region: str) -> Tuple[bool, str, str]:
+def validate_sql(query: str, role: str, selected_store_id: str) -> Tuple[bool, str, str]:
     raw = query.strip()
     normalized = normalize_sql(raw)
     q = normalized.lower()
@@ -269,11 +445,10 @@ def validate_sql(query: str, role: str, selected_region: str) -> Tuple[bool, str
         if table not in allowed_for_role:
             return False, f"Role '{role}' is not allowed to query table `{table}`.", raw
 
-    if role == "Business User" and selected_region != "All":
-        selected_region_lc = selected_region.lower()
-        region_pattern = rf"\bregion\s*=\s*'{re.escape(selected_region_lc)}'"
-        if not re.search(region_pattern, q):
-            return False, f"Business User queries must be scoped to region '{selected_region}'.", raw
+    if role == "Business User" and selected_store_id and selected_store_id != "All":
+        store_pattern = rf"\bstore_id\s*=\s*'{re.escape(selected_store_id)}'"
+        if not re.search(store_pattern, q):
+            return False, f"Business User queries must be scoped to store_id '{selected_store_id}'.", raw
 
     role_max_limit = ROLE_MAX_LIMIT.get(role, DEFAULT_LIMIT)
     limit_match = re.search(r"\blimit\s+(\d+)\b", q)
@@ -345,16 +520,19 @@ def explain_unsupported_request(question: str, role: str) -> Optional[str]:
     return None
 
 
-def llm_to_sql(question: str, selected_region: str) -> str:
+def llm_to_sql(question: str, selected_store_id: str) -> str:
     catalog = os.getenv("DATABRICKS_CATALOG", "main")
     schema = os.getenv("DATABRICKS_SCHEMA", "sales")
-    region_filter = (
-        f" and region = '{selected_region}'" if selected_region and selected_region != "All" else ""
+    safe_store = (selected_store_id or "").replace("'", "''")
+    store_filter = (
+        f" AND store_id = '{safe_store}'"
+        if selected_store_id and selected_store_id != "All"
+        else ""
     )
-    selected_region_rule = (
-        f"- selected_region is '{selected_region}'. You must include `region = '{selected_region}'` in SQL."
-        if selected_region and selected_region != "All"
-        else "- selected_region is 'All'. Do not force a specific region filter unless user asks."
+    store_rule = (
+        f"- selected store_id is '{selected_store_id}'. You must include `store_id = '{selected_store_id}'` in SQL."
+        if selected_store_id and selected_store_id != "All"
+        else "- selected store is 'All'. Do not force a specific store filter unless user asks."
     )
 
     if OpenAI is not None and os.getenv("OPENAI_API_KEY"):
@@ -368,14 +546,14 @@ Return only SQL. No markdown. No explanation.
 Rules:
 - Only SELECT statements.
 - Allowed tables only:
-  - workspace.sales.transactions(order_id, order_date, region, product_name, quantity, unit_price, revenue, customer_id)
+  - workspace.sales.transactions(order_id, order_date, store_id, product_name, quantity, unit_price, revenue, customer_id)
   - workspace.sales.customers(customer_id, customer_name, segment, region)
   - workspace.sales.products(product_name, category)
 - Never use INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, MERGE, GRANT, REVOKE.
 - Always include LIMIT 1000 or less.
 - Prefer simple, readable SQL.
-- Respect selected region context:
-{selected_region_rule}
+- Respect selected store context:
+{store_rule}
 - If the question is ambiguous, return this exact safe query pattern:
   SELECT DATE(order_date) AS day, SUM(revenue) AS total_revenue
   FROM workspace.sales.transactions
@@ -385,6 +563,7 @@ Rules:
   LIMIT 1000
 - If user asks "last month", filter to previous calendar month.
 - If user asks "average", return AVG(revenue) AS avg_order_value.
+- Use store_id (not region) for store-level filtering and grouping.
 
 User question:
 {question}
@@ -411,7 +590,7 @@ User question:
             "SELECT AVG(revenue) AS avg_order_value "
             f"FROM {base} "
             "WHERE DATE_TRUNC('month', order_date) = DATE_TRUNC('month', ADD_MONTHS(CURRENT_DATE(), -1))"
-            f"{region_filter} LIMIT 1"
+            f"{store_filter} LIMIT 1"
         )
 
     if is_last_month and ("revenue" in q or "sales" in q):
@@ -419,7 +598,7 @@ User question:
             "SELECT SUM(revenue) AS total_revenue "
             f"FROM {base} "
             "WHERE DATE_TRUNC('month', order_date) = DATE_TRUNC('month', ADD_MONTHS(CURRENT_DATE(), -1))"
-            f"{region_filter} LIMIT 1"
+            f"{store_filter} LIMIT 1"
         )
 
     if "customer" in q and "segment" in q:
@@ -427,7 +606,7 @@ User question:
         return (
             "SELECT segment, COUNT(DISTINCT customer_id) AS customers "
             f"FROM {customers_table} "
-            f"WHERE 1=1{region_filter} "
+            f"WHERE 1=1{store_filter} "
             "GROUP BY segment ORDER BY customers DESC LIMIT 1000"
         )
 
@@ -436,40 +615,47 @@ User question:
         return (
             "SELECT c.segment, SUM(t.revenue) AS total_revenue "
             f"FROM {base} t JOIN {customers_table} c ON t.customer_id = c.customer_id "
-            f"WHERE 1=1{region_filter} "
+            f"WHERE 1=1{store_filter} "
             "GROUP BY c.segment ORDER BY total_revenue DESC LIMIT 1000"
         )
 
     if "top" in q and "product" in q:
         return (
             "SELECT product_name, SUM(revenue) AS total_revenue "
-            f"FROM {base} WHERE 1=1{region_filter} "
+            f"FROM {base} WHERE 1=1{store_filter} "
             f"GROUP BY product_name ORDER BY total_revenue DESC LIMIT {top_n}"
         )
 
     if "trend" in q or "over time" in q or "daily" in q:
         return (
             "SELECT DATE(order_date) AS day, SUM(revenue) AS total_revenue "
-            f"FROM {base} WHERE 1=1{region_filter} "
+            f"FROM {base} WHERE 1=1{store_filter} "
             "GROUP BY DATE(order_date) ORDER BY day LIMIT 1000"
         )
 
     if is_average or "aov" in q:
         return (
             "SELECT AVG(revenue) AS avg_order_value "
-            f"FROM {base} WHERE 1=1{region_filter} LIMIT 1"
+            f"FROM {base} WHERE 1=1{store_filter} LIMIT 1"
         )
 
     return (
-        "SELECT region, SUM(revenue) AS total_revenue, COUNT(DISTINCT customer_id) AS customers "
-        f"FROM {base} WHERE 1=1{region_filter} GROUP BY region LIMIT 1000"
+        "SELECT store_id, SUM(revenue) AS total_revenue, COUNT(DISTINCT customer_id) AS customers "
+        f"FROM {base} WHERE 1=1{store_filter} GROUP BY store_id LIMIT 1000"
     )
 
 
-def apply_filters(df: pd.DataFrame, start_date: pd.Timestamp, end_date: pd.Timestamp, region: str) -> pd.DataFrame:
+def apply_filters(
+    df: pd.DataFrame,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+    selected_store_id: str,
+) -> pd.DataFrame:
     filtered = df[(df["order_date"] >= start_date) & (df["order_date"] <= end_date)].copy()
-    if region != "All":
-        filtered = filtered[filtered["region"] == region]
+    if selected_store_id and selected_store_id != "All" and "store_id" in filtered.columns:
+        filtered = filtered[filtered["store_id"] == selected_store_id]
+    elif selected_store_id and selected_store_id != "All" and "region" in filtered.columns:
+        filtered = filtered[filtered["region"] == selected_store_id]
     return filtered
 
 
@@ -491,22 +677,25 @@ def render_kpis(df: pd.DataFrame) -> None:
 def get_insight_bullets(df: pd.DataFrame) -> List[str]:
     """Generate 2-3 actionable insight bullets from the filtered dataframe (governed data only)."""
     if df.empty:
-        return ["No data in selected range — adjust date or region filters."]
+        return ["No data in selected range — adjust date or store filters."]
     bullets = []
-    by_region = df.groupby("region", as_index=False)["revenue"].sum()
-    if not by_region.empty:
-        top_region = by_region.loc[by_region["revenue"].idxmax()]
-        bullets.append(f"**{top_region['region']}** is the top region by revenue in the selected period (${top_region['revenue']:,.0f}).")
+    group_col = "store_id" if "store_id" in df.columns else "region"
+    if group_col in df.columns:
+        by_store = df.groupby(group_col, as_index=False)["revenue"].sum()
+        if not by_store.empty:
+            top = by_store.loc[by_store["revenue"].idxmax()]
+            label = str(top[group_col])
+            bullets.append(f"**{label}** is the top store by revenue in the selected period (${top['revenue']:,.0f}).")
     by_product = df.groupby("product_name", as_index=False)["revenue"].sum().sort_values("revenue", ascending=False)
-    if len(by_product) >= 2:
+    if "product_name" in df.columns and len(by_product) >= 2:
         top2 = by_product.head(2)
         top2_rev = top2["revenue"].sum()
         total_rev = df["revenue"].sum()
         pct = (top2_rev / total_rev * 100) if total_rev else 0
         names = ", ".join(top2["product_name"].tolist())
-        bullets.append(f"**{names}** drive {pct:.0f}% of revenue; consider promotion in underperforming regions.")
+        bullets.append(f"**{names}** drive {pct:.0f}% of revenue; consider promotion in underperforming stores.")
     aov = df["revenue"].sum() / df["order_id"].nunique() if df["order_id"].nunique() else 0
-    bullets.append(f"Average order value in selection: **${aov:,.2f}** — use chat to compare across regions.")
+    bullets.append(f"Average order value in selection: **${aov:,.2f}** — use chat to compare across stores.")
     return bullets[:3]
 
 
@@ -519,9 +708,12 @@ def render_charts(df: pd.DataFrame) -> None:
     day_df = df.copy()
     day_df["order_day"] = pd.to_datetime(day_df["order_date"]).dt.date
     by_day = day_df.groupby("order_day", as_index=False)["revenue"].sum()
-    by_region = df.groupby("region", as_index=False)["revenue"].sum()
+    group_col = "store_id" if "store_id" in df.columns else "region"
+    by_store = df.groupby(group_col, as_index=False)["revenue"].sum() if group_col in df.columns else pd.DataFrame()
     by_product = (
         df.groupby("product_name", as_index=False)["revenue"].sum().sort_values("revenue", ascending=False)
+        if "product_name" in df.columns
+        else pd.DataFrame()
     )
 
     col1, col2 = st.columns(2)
@@ -530,11 +722,15 @@ def render_charts(df: pd.DataFrame) -> None:
         st.plotly_chart(fig_line, use_container_width=True)
 
     with col2:
-        fig_bar = px.bar(by_region, x="region", y="revenue", title="Revenue by Region")
-        st.plotly_chart(fig_bar, use_container_width=True)
+        if not by_store.empty:
+            fig_bar = px.bar(by_store, x=group_col, y="revenue", title="Revenue by Store")
+            st.plotly_chart(fig_bar, use_container_width=True)
+        else:
+            st.caption("No store breakdown (add store_id to data for Revenue by Store).")
 
-    fig_pie = px.pie(by_product.head(8), names="product_name", values="revenue", title="Revenue Mix by Product")
-    st.plotly_chart(fig_pie, use_container_width=True)
+    if not by_product.empty:
+        fig_pie = px.pie(by_product.head(8), names="product_name", values="revenue", title="Revenue Mix by Product")
+        st.plotly_chart(fig_pie, use_container_width=True)
 
 
 def build_demo_fallback_result(sql_text: str, df: pd.DataFrame) -> pd.DataFrame:
@@ -542,9 +738,10 @@ def build_demo_fallback_result(sql_text: str, df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
-    if "group by region" in q and "sum(revenue)" in q:
+    group_col = "store_id" if "store_id" in df.columns else "region"
+    if ("group by store_id" in q or "group by region" in q) and "sum(revenue)" in q and group_col in df.columns:
         return (
-            df.groupby("region", as_index=False)
+            df.groupby(group_col, as_index=False)
             .agg(total_revenue=("revenue", "sum"), customers=("customer_id", "nunique"))
             .sort_values("total_revenue", ascending=False)
         )
@@ -591,6 +788,275 @@ def log_event(
     logs = st.session_state.setdefault("audit_logs", [])
     logs.insert(0, entry)
     st.session_state["audit_logs"] = logs
+
+
+def _render_add_transaction_page() -> None:
+    st.subheader("Add Transaction")
+    st.caption("Insert a new row into Databricks **transactions**. Order ID is auto-generated.")
+    if not databricks_configured():
+        st.warning("Databricks is not configured. Set .env and connect to save data.")
+        return
+
+    products_list = get_databricks_products()
+    store_options = [(s[0], s[1]) for s in get_databricks_stores() if s[0] != "All"]
+    store_names = [s[1] for s in store_options]
+    product_names = [p.get("product_name") or "" for p in products_list if p.get("product_name")]
+
+    if not product_names:
+        st.warning("No products in catalog. Add products first from **Add Product**.")
+    if not store_names:
+        st.warning("No stores configured. Add stores in Databricks workspace.admin.stores or enter Store ID below.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        order_date = st.date_input("Order Date", value=datetime.now().date())
+        selected_product_name = st.selectbox(
+            "Product",
+            options=product_names,
+            key="tx_product",
+        ) if product_names else None
+        quantity = st.number_input("Quantity", min_value=1, value=1, key="tx_qty")
+
+    unit_price = 0.0
+    if selected_product_name and products_list:
+        for p in products_list:
+            if (p.get("product_name") or "") == selected_product_name:
+                unit_price = float(p.get("product_price") or 0)
+                break
+    total = quantity * unit_price
+
+    with col2:
+        if store_names:
+            selected_store_name = st.selectbox("Store", options=store_names, key="tx_store")
+            store_id = next((s[0] for s in store_options if s[1] == selected_store_name), store_names[0] if store_names else None)
+        else:
+            store_id = st.text_input("Store ID", placeholder="e.g. S1", key="tx_store_id")
+        customer_id = st.text_input("Customer ID", placeholder="e.g. C001", key="tx_customer")
+
+    st.divider()
+    st.caption("Unit price comes from the selected product; total = quantity × unit price.")
+    r1, r2, r3 = st.columns(3)
+    with r1:
+        st.metric("Unit Price", f"${unit_price:,.2f}")
+    with r2:
+        st.metric("Quantity", quantity)
+    with r3:
+        st.metric("Total", f"${total:,.2f}")
+
+    if st.button("Save to Databricks", type="primary", key="tx_save"):
+        if not selected_product_name and not product_names:
+            st.error("Select a product (or add products first).")
+        elif not customer_id or not customer_id.strip():
+            st.error("Customer ID is required.")
+        else:
+            order_id = "ORD-" + uuid.uuid4().hex[:12].upper()
+            sid = store_id if isinstance(store_id, str) else (store_options[0][0] if store_options else "")
+            ok, err = insert_transaction(
+                order_id,
+                order_date.strftime("%Y-%m-%d"),
+                sid,
+                selected_product_name or "",
+                int(quantity),
+                float(unit_price),
+                customer_id.strip(),
+            )
+            if ok:
+                st.success(f"Transaction saved. Order ID: **{order_id}**")
+            else:
+                st.error("Failed to save.")
+                if err:
+                    st.code(err, language="text")
+
+
+def _render_add_customer_page() -> None:
+    st.subheader("Add Customer")
+    st.caption("Insert a new row into Databricks **customers** (workspace.sales.customers).")
+    if not databricks_configured():
+        st.warning("Databricks is not configured. Set .env and connect to save data.")
+        return
+    store_options = [(s[0], s[1]) for s in get_databricks_stores() if s[0] != "All"]
+    store_names = [s[1] for s in store_options]
+    with st.form("add_customer_form"):
+        customer_id = st.text_input("Customer ID", placeholder="e.g. C001")
+        customer_name = st.text_input("Customer Name", placeholder="e.g. Acme Corp")
+        segment = st.text_input("Segment", placeholder="e.g. Enterprise")
+        if store_names:
+            selected_store_name = st.selectbox("Store", options=store_names)
+            store_id = next((s[0] for s in store_options if s[1] == selected_store_name), store_options[0][0] if store_options else "")
+        else:
+            store_id = st.text_input("Store ID", placeholder="e.g. S1")
+        submitted = st.form_submit_button("Save to Databricks")
+    if submitted:
+        if not customer_id:
+            st.error("Customer ID is required.")
+        else:
+            sid = store_id if isinstance(store_id, str) else (store_options[0][0] if store_options else "")
+            ok, err = insert_customer(
+                customer_id.strip(),
+                (customer_name or "").strip(),
+                (segment or "").strip(),
+                sid,
+            )
+            if ok:
+                st.success("Customer saved to Databricks.")
+            else:
+                st.error("Failed to save.")
+                if err:
+                    st.code(err, language="text")
+
+
+def _render_add_product_page() -> None:
+    st.subheader("Add Product")
+    st.caption("Insert a new row into Databricks **products** (product_id, product_name, product_price, category).")
+    if not databricks_configured():
+        st.warning("Databricks is not configured. Set .env and connect to save data.")
+        return
+    with st.form("add_product_form"):
+        product_id = st.text_input("Product ID", placeholder="e.g. P001")
+        product_name = st.text_input("Product Name", placeholder="e.g. Alpha")
+        product_price = st.number_input("Product Price", min_value=0.0, value=0.0, format="%.2f", step=0.01)
+        category = st.text_input("Category", placeholder="e.g. Electronics")
+        submitted = st.form_submit_button("Save to Databricks")
+    if submitted:
+        if not product_id or not product_name:
+            st.error("Product ID and Product Name are required.")
+        else:
+            ok, err = insert_product(
+                product_id.strip(),
+                product_name.strip(),
+                float(product_price),
+                (category or "").strip(),
+            )
+            if ok:
+                st.success("Product saved to Databricks.")
+            else:
+                st.error("Failed to save.")
+                if err:
+                    st.code(err, language="text")
+
+
+def _render_add_store_page() -> None:
+    """Add Store page: only visible and submittable by Manager role (enforced in code; optional in Databricks)."""
+    if not can_access("add_store"):
+        st.subheader("Add Store")
+        st.warning("Only **Manager** role can add stores. Your role does not have access.")
+        return
+    st.subheader("Add Store")
+    st.caption("Insert a new store into Databricks **admin.stores** (Manager only).")
+    if not databricks_configured():
+        st.warning("Databricks is not configured. Set .env and connect to save data.")
+        return
+    with st.form("add_store_form"):
+        store_id = st.text_input("Store ID", placeholder="e.g. S5")
+        store_name = st.text_input("Store Name", placeholder="e.g. Store Central")
+        location = st.text_input("Location", placeholder="e.g. Salt Lake City")
+        submitted = st.form_submit_button("Save to Databricks")
+    if submitted:
+        if not store_id or not store_name:
+            st.error("Store ID and Store Name are required.")
+        else:
+            ok, err = insert_store(
+                store_id.strip(),
+                store_name.strip(),
+                (location or "").strip(),
+            )
+            if ok:
+                st.success("Store saved to Databricks.")
+            else:
+                st.error("Failed to save.")
+                if err:
+                    st.code(err, language="text")
+
+
+def _render_user_management_page() -> None:
+    """User management: list users and create new users (set password). IT Admin only."""
+    if not can_access("user_management"):
+        st.subheader("User management")
+        st.warning("Only **IT Admin** can access User management (create users and set passwords).")
+        return
+    st.subheader("User management")
+    st.caption("List users, reset passwords, and create new accounts. Only IT Admin can access this page.")
+    if not db_auth or not db_auth.databricks_auth_configured():
+        st.warning("Databricks auth is not configured. Set .env and connect to list or create users.")
+        return
+    users = db_auth.list_users()
+    if users:
+        st.caption(f"**{len(users)}** user(s)")
+        df = pd.DataFrame(users)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.markdown("---")
+        with st.expander("Reset password (for user who forgot password)"):
+            st.caption("Set a new password for an existing user. If they have an email on file and SMTP is configured, the new password will be sent to their email; otherwise share it with them manually.")
+            with st.form("user_mgmt_reset_pwd"):
+                usernames = [u["username"] for u in users]
+                reset_username = st.selectbox("User", usernames, key="reset_username")
+                new_password = st.text_input("New password", type="password", placeholder="••••••••", key="reset_pwd")
+                new_confirm = st.text_input("Confirm new password", type="password", placeholder="••••••••", key="reset_confirm")
+                reset_submitted = st.form_submit_button("Reset password")
+            if reset_submitted:
+                if not new_password:
+                    st.error("Enter a new password.")
+                elif new_password != new_confirm:
+                    st.error("Passwords do not match.")
+                else:
+                    ok, err_msg = db_auth.reset_user_password(reset_username, new_password)
+                    if ok:
+                        st.success(f"Password updated for **{reset_username}**. They can log in with the new password.")
+                        st.rerun()
+                    else:
+                        st.error("Failed to reset password.")
+                        if err_msg:
+                            st.code(err_msg, language="text")
+    else:
+        st.info("No users in Databricks yet. Create the first user below (e.g. an IT Admin).")
+    st.markdown("---")
+    st.caption("Create new user (password is required and stored securely as hash)")
+    with st.form("user_mgmt_create"):
+        firstname = st.text_input("First name", placeholder="e.g. Jane")
+        lastname = st.text_input("Last name", placeholder="e.g. Smith")
+        username = st.text_input("Username", placeholder="e.g. jane.smith")
+        email = st.text_input("Email", placeholder="e.g. jane@example.com", help="Used for password-reset notifications.")
+        password = st.text_input("Password", type="password", placeholder="••••••••")
+        confirm = st.text_input("Confirm password", type="password", placeholder="••••••••")
+        roles_list = db_auth.get_roles()
+        if roles_list:
+            role_options = [r["role_name"] for r in roles_list]
+            role_ids = [r["role_id"] for r in roles_list]
+            role_display = st.selectbox("Role", role_options)
+            role_id = role_ids[role_options.index(role_display)] if role_display in role_options else role_ids[0]
+        else:
+            role_display = "Business User"
+            role_id = "role_business"
+        stores_list = db_auth.get_stores()
+        if stores_list:
+            store_options = ["— None —"] + [s["store_name"] for s in stores_list]
+            store_ids = [None] + [s["store_id"] for s in stores_list]
+            store_display = st.selectbox("Store (optional)", store_options)
+            store_id = store_ids[store_options.index(store_display)] if store_display in store_options else None
+        else:
+            store_id = None
+        submitted = st.form_submit_button("Create user")
+    if submitted:
+        firstname = (firstname or "").strip()
+        lastname = (lastname or "").strip()
+        username = (username or "").strip()
+        if not username:
+            st.error("Username is required.")
+        elif not password:
+            st.error("Password is required.")
+        elif password != confirm:
+            st.error("Passwords do not match.")
+        elif db_auth.username_exists(username):
+            st.error("That username is already taken.")
+        else:
+            ok, err_msg = db_auth.register_user(firstname, lastname, username, password, role_id, store_id, email=(email or "").strip() or None)
+            if ok:
+                st.success(f"User **{username}** created. They can log in with that password. Password-reset emails will go to their email if set.")
+                st.rerun()
+            else:
+                st.error("Failed to create user.")
+                if err_msg:
+                    st.code(err_msg, language="text")
 
 
 def main() -> None:
@@ -641,6 +1107,22 @@ def main() -> None:
         st.caption("View")
         if st.button("Dashboard", use_container_width=True):
             st.session_state["view_mode"] = "Dashboard"
+        if st.button("Add Transaction", use_container_width=True):
+            st.session_state["view_mode"] = "Add Transaction"
+        if st.button("Add Customer", use_container_width=True):
+            st.session_state["view_mode"] = "Add Customer"
+        if st.button("Add Product", use_container_width=True):
+            st.session_state["view_mode"] = "Add Product"
+        if can_access("add_store"):
+            if st.button("Add Store", use_container_width=True):
+                st.session_state["view_mode"] = "Add Store"
+        elif st.session_state.get("view_mode") == "Add Store":
+            st.session_state["view_mode"] = "Dashboard"
+        if can_access("user_management"):
+            if st.button("User management", use_container_width=True):
+                st.session_state["view_mode"] = "User management"
+        elif st.session_state.get("view_mode") == "User management":
+            st.session_state["view_mode"] = "Dashboard"
         if can_access("audit_log"):
             if st.button("Audit Log", use_container_width=True):
                 st.session_state["view_mode"] = "Audit Log"
@@ -665,6 +1147,22 @@ def main() -> None:
             st.dataframe(logs, use_container_width=True)
         return
 
+    if view == "Add Transaction":
+        _render_add_transaction_page()
+        return
+    if view == "Add Customer":
+        _render_add_customer_page()
+        return
+    if view == "Add Product":
+        _render_add_product_page()
+        return
+    if view == "Add Store":
+        _render_add_store_page()
+        return
+    if view == "User management":
+        _render_user_management_page()
+        return
+
     # Dashboard data: Databricks when configured, else demo data
     if databricks_configured():
         db_min, db_max = get_databricks_date_range()
@@ -675,27 +1173,29 @@ def main() -> None:
             today = date.today()
             min_date = today - timedelta(days=365)
             max_date = today
-        region_options = get_databricks_regions()
+        store_options = get_databricks_stores()
     else:
         demo_df = load_demo_data()
         min_date = demo_df["order_date"].min().date()
         max_date = demo_df["order_date"].max().date()
-        region_options = ["All", "West", "East", "North", "South"]
+        store_options = get_databricks_stores()
 
+    store_display_names = [s[1] for s in store_options]
     c1, c2, c3 = st.columns(3)
     with c1:
         start_date = st.date_input("Start Date", min_date)
     with c2:
         end_date = st.date_input("End Date", max_date)
     with c3:
-        selected_region = st.selectbox("Region", region_options)
+        selected_store_label = st.selectbox("Store", store_display_names)
+        selected_store_id = store_options[store_display_names.index(selected_store_label)][0] if selected_store_label in store_display_names else "All"
 
     if databricks_configured():
         try:
             filtered_df = load_dashboard_data_from_databricks(
                 pd.to_datetime(start_date),
                 pd.to_datetime(end_date),
-                selected_region,
+                selected_store_id,
             )
         except Exception as e:
             st.error(f"Could not load data from Databricks: {e}")
@@ -705,7 +1205,7 @@ def main() -> None:
             load_demo_data(),
             pd.to_datetime(start_date),
             pd.to_datetime(end_date),
-            selected_region,
+            selected_store_id,
         )
 
     st.subheader("KPI Dashboard")
@@ -726,12 +1226,12 @@ def main() -> None:
         - **Catalog:** `workspace` · **Schema:** `sales`
 
         **Tables used for this dashboard:**
-        - `workspace.sales.transactions` — order_id, order_date, region, product_name, quantity, unit_price, revenue, customer_id
+        - `workspace.sales.transactions` — order_id, order_date, store_id, product_name, quantity, unit_price, revenue, customer_id
         - `workspace.sales.customers` — customer_id, customer_name, segment, region
         - `workspace.sales.products` — product_name, category
 
         **KPI formulas (reproducible):**
-        - **Revenue:** `SUM(revenue)` from transactions, with date and region filters applied.
+        - **Revenue:** `SUM(revenue)` from transactions, with date and store filters applied.
         - **Orders:** `COUNT(DISTINCT order_id)` from transactions.
         - **Customers:** `COUNT(DISTINCT customer_id)` from transactions.
         - **AOV:** Revenue ÷ Orders.
@@ -789,9 +1289,9 @@ def main() -> None:
                 with st.spinner("Thinking..."):
                     time.sleep(1.2)
 
-            generated_sql = llm_to_sql(cleaned, selected_region)
+            generated_sql = llm_to_sql(cleaned, selected_store_id)
 
-            ok, message, safe_sql = validate_sql(generated_sql, role, selected_region)
+            ok, message, safe_sql = validate_sql(generated_sql, role, selected_store_id)
             if not ok:
                 blocked_text = f"""I blocked this query for safety.
 
@@ -813,7 +1313,7 @@ Generated SQL:
                     message,
                 )
             else:
-                assistant_text = f"""I can help with sales trends, regions, top products, and KPIs.
+                assistant_text = f"""I can help with sales trends, stores, top products, and KPIs.
 
 Generated SQL:
 ```sql
@@ -853,7 +1353,7 @@ Generated SQL:
                     if result_df.empty:
                         st.info(
                             "No rows returned for this query with current filters. "
-                            "Try changing date range, region, or question."
+                            "Try changing date range, store, or question."
                         )
                     else:
                         st.dataframe(result_df, use_container_width=True)

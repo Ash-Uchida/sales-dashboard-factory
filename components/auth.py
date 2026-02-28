@@ -15,6 +15,7 @@ except Exception:
 # Demo users when Databricks auth is not configured.
 DEMO_USERS: Dict[str, Dict[str, str]] = {
     "store_manager": {"password": "demo123", "role": "Business User"},
+    "manager": {"password": "demo123", "role": "Manager"},
     "analyst": {"password": "demo123", "role": "Data Analyst"},
     "admin": {"password": "demo123", "role": "IT Admin"},
 }
@@ -23,11 +24,13 @@ DEMO_USERS: Dict[str, Dict[str, str]] = {
 PAGE_ACCESS: Dict[str, List[str]] = {
     "Business User": ["dashboard", "chat"],
     "Data Analyst": ["dashboard", "chat", "audit_log"],
-    "IT Admin": ["dashboard", "chat", "audit_log"],
+    "IT Admin": ["dashboard", "chat", "audit_log", "user_management"],
+    "Manager": ["dashboard", "chat", "add_store"],
 }
 
 # Page IDs used in the app (must match can_access(page) calls).
-PAGES = ["dashboard", "chat", "audit_log"]
+# user_management: create users / set passwords — IT Admin only.
+PAGES = ["dashboard", "chat", "audit_log", "add_store", "user_management"]
 
 
 def _get_signups() -> Dict[str, Dict[str, str]]:
@@ -56,9 +59,11 @@ def get_current_user() -> Optional[str]:
 
 
 def get_current_role() -> str:
-    """Return current role (role_name); defaults to Business User if not logged in."""
+    """Return current role (role_name); defaults to Business User if not logged in or role is null."""
     u = _session_user()
-    return u.get("role", "Business User") if u else "Business User"
+    if not u:
+        return "Business User"
+    return u.get("role") or "Business User"
 
 
 def get_current_firstname() -> str:
@@ -159,6 +164,7 @@ def render_signup_form() -> bool:
         firstname = st.text_input("First name", placeholder="e.g. Jane")
         lastname = st.text_input("Last name", placeholder="e.g. Smith")
         username = st.text_input("Username", placeholder="e.g. jane.smith")
+        email = st.text_input("Email", placeholder="e.g. jane@example.com", help="Used for password-reset notifications.")
         password = st.text_input("Password", type="password", placeholder="••••••••")
         confirm = st.text_input("Confirm password", type="password", placeholder="••••••••")
         if use_db_signup:
@@ -196,7 +202,7 @@ def render_signup_form() -> bool:
             if db_auth.username_exists(username):
                 st.error("That username is already taken.")
             else:
-                ok, err_msg = db_auth.register_user(firstname, lastname, username, password, role_id, store_id)
+                ok, err_msg = db_auth.register_user(firstname, lastname, username, password, role_id, store_id, email=(email or "").strip() or None)
                 if ok:
                     user_info = db_auth.get_user_after_login(username)
                     if user_info:
