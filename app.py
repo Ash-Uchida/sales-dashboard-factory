@@ -1,6 +1,7 @@
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -118,20 +119,36 @@ def databricks_configured() -> bool:
     )
 
 
-def execute_databricks_query(query: str) -> pd.DataFrame:
-    conn = dbsql.connect(
-        server_hostname=os.environ["DATABRICKS_SERVER_HOSTNAME"],
-        http_path=os.environ["DATABRICKS_HTTP_PATH"],
-        access_token=os.environ["DATABRICKS_TOKEN"],
-    )
+def execute_databricks_query(query: str, timeout_seconds: int = 25) -> pd.DataFrame:
+    def _run() -> pd.DataFrame:
+        conn = dbsql.connect(
+            server_hostname=os.environ["DATABRICKS_SERVER_HOSTNAME"],
+            http_path=os.environ["DATABRICKS_HTTP_PATH"],
+            access_token=os.environ["DATABRICKS_TOKEN"],
+        )
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(query)
+                rows = cursor.fetchall()
+                colnames = [c[0] for c in cursor.description]
+            return pd.DataFrame(rows, columns=colnames)
+        finally:
+            conn.close()
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(_run)
     try:
-        with conn.cursor() as cursor:
-            cursor.execute(query)
-            rows = cursor.fetchall()
-            colnames = [c[0] for c in cursor.description]
-        return pd.DataFrame(rows, columns=colnames)
+        return future.result(timeout=timeout_seconds)
+    except FuturesTimeoutError as exc:
+        future.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise TimeoutError(
+            f"Databricks query timed out after {timeout_seconds} seconds. "
+            "Check warehouse state or retry."
+        ) from exc
     finally:
-        conn.close()
+        # Avoid blocking shutdown when connector calls stall.
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def normalize_sql(query: str) -> str:
@@ -459,6 +476,42 @@ def render_charts(df: pd.DataFrame) -> None:
     st.plotly_chart(fig_pie, use_container_width=True)
 
 
+def build_demo_fallback_result(sql_text: str, df: pd.DataFrame) -> pd.DataFrame:
+    q = (sql_text or "").lower()
+    if df.empty:
+        return pd.DataFrame()
+
+    if "group by region" in q and "sum(revenue)" in q:
+        return (
+            df.groupby("region", as_index=False)
+            .agg(total_revenue=("revenue", "sum"), customers=("customer_id", "nunique"))
+            .sort_values("total_revenue", ascending=False)
+        )
+
+    if "group by product_name" in q and "sum(revenue)" in q:
+        limit_match = re.search(r"\blimit\s+(\d+)\b", q)
+        limit_n = int(limit_match.group(1)) if limit_match else 10
+        return (
+            df.groupby("product_name", as_index=False)["revenue"]
+            .sum()
+            .rename(columns={"revenue": "total_revenue"})
+            .sort_values("total_revenue", ascending=False)
+            .head(limit_n)
+        )
+
+    if "avg(revenue)" in q:
+        return pd.DataFrame(
+            [{"avg_order_value": float(df["revenue"].mean()) if not df.empty else 0.0}]
+        )
+
+    if "sum(revenue)" in q and "group by" not in q:
+        return pd.DataFrame(
+            [{"total_revenue": float(df["revenue"].sum()) if not df.empty else 0.0}]
+        )
+
+    return df.head(200).copy()
+
+
 def log_event(
     role: str,
     question: str,
@@ -493,6 +546,10 @@ def main() -> None:
         st.session_state["audit_logs"] = []
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
+    if "latest_query_result" not in st.session_state:
+        st.session_state["latest_query_result"] = None
+    if "latest_query_sql" not in st.session_state:
+        st.session_state["latest_query_sql"] = None
 
     role = get_current_role()
 
@@ -534,6 +591,9 @@ def main() -> None:
         st.subheader("Audit Log")
         logs = pd.DataFrame(st.session_state.get("audit_logs", []))
         st.caption(f"Entries: {len(logs)}")
+        if st.button("Clear Audit Log"):
+            st.session_state["audit_logs"] = []
+            st.rerun()
         if logs.empty:
             st.info("No queries logged yet.")
         else:
@@ -610,6 +670,7 @@ def main() -> None:
         st.session_state.chat_history.append({"role": "user", "content": cleaned})
         with st.chat_message("user"):
             st.markdown(cleaned)
+        # Always write an initial audit row so in-flight requests are visible.
         log_event(
             role,
             cleaned,
@@ -632,6 +693,8 @@ def main() -> None:
             )
             return
 
+        generated_sql = ""
+        safe_sql = ""
         try:
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
@@ -671,10 +734,30 @@ Generated SQL:
                 with st.chat_message("assistant"):
                     st.markdown(assistant_text)
 
-                if databricks_configured():
-                    result_df = execute_databricks_query(safe_sql)
+                chat_execution_mode = os.getenv("CHAT_EXECUTION_MODE", "demo").strip().lower()
+                use_databricks_for_chat = databricks_configured() and chat_execution_mode == "databricks"
+
+                if use_databricks_for_chat:
+                    try:
+                        result_df = execute_databricks_query(safe_sql)
+                    except Exception as db_err:
+                        result_df = build_demo_fallback_result(safe_sql, filtered_df)
+                        with st.chat_message("assistant"):
+                            st.info(
+                                "Databricks query execution is slow/unavailable right now. "
+                                "Showing demo fallback result so you can continue."
+                            )
+                        log_event(
+                            role,
+                            cleaned,
+                            safe_sql,
+                            "SUCCESS",
+                            f"fallback_demo_result (db_error={str(db_err)[:120]}) rows_returned={len(result_df)}",
+                        )
                 else:
-                    result_df = filtered_df.head(200)
+                    result_df = build_demo_fallback_result(safe_sql, filtered_df)
+                st.session_state["latest_query_result"] = result_df
+                st.session_state["latest_query_sql"] = safe_sql
 
                 with st.chat_message("assistant"):
                     st.markdown("Query results:")
@@ -691,13 +774,21 @@ Generated SQL:
                         )
                         st.plotly_chart(fig, use_container_width=True)
 
-                log_event(
-                    role,
-                    cleaned,
-                    safe_sql,
-                    "SUCCESS",
-                    f"rows_returned={len(result_df)}",
+                existing = st.session_state.get("audit_logs", [])
+                already_logged_fallback = (
+                    len(existing) > 0
+                    and existing[0].get("status") == "SUCCESS"
+                    and "fallback_demo_result" in str(existing[0].get("outcome", ""))
+                    and existing[0].get("question") == cleaned
                 )
+                if not already_logged_fallback:
+                    log_event(
+                        role,
+                        cleaned,
+                        safe_sql,
+                        "SUCCESS",
+                        f"rows_returned={len(result_df)}",
+                    )
         except Exception as e:
             error_text = (
                 "I couldn't process that request safely right now. "
@@ -709,10 +800,27 @@ Generated SQL:
             log_event(
                 role,
                 cleaned,
-                "N/A",
+                safe_sql or generated_sql or "N/A",
                 "ERROR",
                 f"malformed output or execution failure: {e}",
             )
+
+    st.markdown("**Latest Query Result**")
+    latest_df = st.session_state.get("latest_query_result")
+    if latest_df is None:
+        st.caption("Run a chat query to see result data and chart here.")
+    else:
+        st.dataframe(latest_df, use_container_width=True)
+        numeric_cols = latest_df.select_dtypes(include="number").columns
+        non_numeric_cols = [c for c in latest_df.columns if c not in numeric_cols]
+        if len(numeric_cols) >= 1 and len(non_numeric_cols) >= 1:
+            fig = px.bar(
+                latest_df.head(20),
+                x=non_numeric_cols[0],
+                y=numeric_cols[0],
+                title="Latest Query Chart",
+            )
+            st.plotly_chart(fig, use_container_width=True)
     if can_access("audit_log"):
         with st.expander("Audit Log"):
             logs = pd.DataFrame(st.session_state.get("audit_logs", []))
