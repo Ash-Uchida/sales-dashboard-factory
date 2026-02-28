@@ -33,17 +33,20 @@ Business User:
 - Can view KPIs, charts, and filters.
 - Can ask business questions in chat.
 - Cannot run raw SQL directly.
-- Must stay within governed table scope.
+- Query scope is restricted to approved transactions-level analytics.
+- Cannot access Audit Log view.
 
 Data Analyst:
 - Can extend dashboard metrics and visualization logic.
 - Can tune approved analytical queries.
+- Can access Audit Log view for review and QA.
 - Cannot modify core governance policy in production.
 
 IT Admin:
 - Can review query logs and generated SQL.
 - Can disable non-compliant behavior.
 - Can manage access and governance policies.
+- Can access Audit Log view and governance evidence during demo.
 
 ## 4. Application Template Requirements
 Every Sales Dashboard Factory app must include:
@@ -52,7 +55,8 @@ Every Sales Dashboard Factory app must include:
 - Date filter.
 - Region filter.
 - Conversational analytics interface.
-- Query/audit log visibility for oversight.
+- Query/audit log visibility for authorized roles (Data Analyst, IT Admin).
+- Optional AI insight summary that can be toggled on/off.
 
 Dashboard standards:
 - KPI formulas must be reproducible.
@@ -67,6 +71,7 @@ The system enforces the following guardrails:
 - Query row limits are enforced.
 - AI-generated SQL must pass validation prior to execution.
 - Unsafe SQL is blocked and logged.
+- Business User role receives stricter table/query scope than Analyst/Admin roles.
 
 ## 6. AI Governance Policy
 AI is used for natural-language-to-SQL translation only.
@@ -76,12 +81,14 @@ AI policy:
 - Do not access external APIs or external datasets.
 - Produce auditable SQL output for every prompt.
 - Defer execution to the validation and governance layer.
+- When live warehouse execution is unstable, demo-safe fallback execution may be used to preserve user experience while keeping validation and logging active.
 
 This allows speed and accessibility without bypassing policy controls.
 
 ## 7. IT Oversight and Auditability
 For operational control and compliance:
-- User question, generated SQL, timestamp, role, and status are logged.
+- User question, generated SQL, timestamp, role, status, and outcome are logged.
+- Status values include: `RECEIVED`, `SUCCESS`, `BLOCKED`, `ERROR`.
 - Blocked queries are retained for review.
 - Admin role can inspect activity and intervene when needed.
 
