@@ -3,7 +3,7 @@
 ## Where passwords live and who can access them
 
 - **Stored:** Passwords are stored only as **hashes** in `workspace.admin.users.password_hash` (SHA256). The app and `auth_view` never return the hash or plaintext to the UI.
-- **Who can set passwords:** Only **IT Admin** can create users and set their initial password, via the **User management** page in the app. There is no public “Sign up” link; new accounts are created by an IT Admin.
+- **Who can set passwords:** Users can self-register via Sign up on the login page. **IT Admin** can also create users and reset passwords via the **User management** page.
 - **Who can see passwords:** Nobody. Plaintext passwords are never stored. Login only verifies the password (via `check_password` procedure or a hash comparison); the value is never exposed.
 - **First IT Admin:** Create at least one IT Admin user directly in Databricks (e.g. INSERT into `workspace.admin.users` with `role_id = 'role_admin'` and a hashed password), or run a one-time script. After that, that user can log in and create others from User management.
 - **Email:** Users have an optional `email` (stored in `workspace.admin.users`). When an IT Admin resets a user’s password, the new password is emailed to that address if (1) the user has an email on file and (2) SMTP is configured in `.env` (see below).
@@ -37,7 +37,7 @@ If these are not set, the password is still reset; the IT Admin must share the n
 | **User management** (list users, create user, set password) | ❌ | ❌ | ❌ | ✅ |
 
 - **Chat / SQL:** Business User and Manager can only query `transactions`, scoped to their store, max 1,000 rows. Data Analyst and IT Admin can query `transactions`, `customers`, `products`, max 100,000 rows.
-- **User management** is the only place where new users are created and passwords are set; it is restricted to IT Admin in the app.
+- **User management** (IT Admin only) lets admins create users and reset passwords. Self-registration is also available via Sign up on the login page.
 
 ---
 
