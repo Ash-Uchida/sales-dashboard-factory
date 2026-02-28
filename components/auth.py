@@ -164,7 +164,6 @@ def render_signup_form() -> bool:
         firstname = st.text_input("First name", placeholder="e.g. Jane")
         lastname = st.text_input("Last name", placeholder="e.g. Smith")
         username = st.text_input("Username", placeholder="e.g. jane.smith")
-        email = st.text_input("Email", placeholder="e.g. jane@example.com", help="Used for password-reset notifications.")
         password = st.text_input("Password", type="password", placeholder="••••••••")
         confirm = st.text_input("Confirm password", type="password", placeholder="••••••••")
         if use_db_signup:
@@ -202,7 +201,7 @@ def render_signup_form() -> bool:
             if db_auth.username_exists(username):
                 st.error("That username is already taken.")
             else:
-                ok, err_msg = db_auth.register_user(firstname, lastname, username, password, role_id, store_id, email=(email or "").strip() or None)
+                ok, err_msg = db_auth.register_user(firstname, lastname, username, password, role_id, store_id)
                 if ok:
                     user_info = db_auth.get_user_after_login(username)
                     if user_info:

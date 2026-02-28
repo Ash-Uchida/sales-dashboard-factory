@@ -535,11 +535,12 @@ def llm_to_sql(question: str, selected_store_id: str) -> str:
         else "- selected store is 'All'. Do not force a specific store filter unless user asks."
     )
 
-    if OpenAI is not None and os.getenv("OPENAI_API_KEY"):
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
-        prompt = f"""
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    if OpenAI is not None and api_key:
+        try:
+            client = OpenAI(api_key=api_key)
+            model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+            prompt = f"""
 You are a SQL generator for Databricks.
 Return only SQL. No markdown. No explanation.
 
@@ -568,15 +569,17 @@ Rules:
 User question:
 {question}
 """.strip()
-
-        response = client.responses.create(
-            model=model,
-            input=prompt,
-            temperature=0,
-        )
-        text = response.output_text.strip()
-        candidate_sql = clean_sql_output(text)
-        return candidate_sql.rstrip(";")
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+            )
+            if response.choices and response.choices[0].message.content:
+                text = response.choices[0].message.content.strip()
+                candidate_sql = clean_sql_output(text)
+                return candidate_sql.rstrip(";")
+        except Exception:
+            pass  # Fall back to rule-based SQL (e.g. 429 quota, network, or empty response)
 
     q = question.lower()
     base = f"{catalog}.{schema}.transactions"
@@ -986,7 +989,7 @@ def _render_user_management_page() -> None:
         st.dataframe(df, use_container_width=True, hide_index=True)
         st.markdown("---")
         with st.expander("Reset password (for user who forgot password)"):
-            st.caption("Set a new password for an existing user. If they have an email on file and SMTP is configured, the new password will be sent to their email; otherwise share it with them manually.")
+            st.caption("Set a new password for an existing user. Share the new password with them manually.")
             with st.form("user_mgmt_reset_pwd"):
                 usernames = [u["username"] for u in users]
                 reset_username = st.selectbox("User", usernames, key="reset_username")
@@ -1015,7 +1018,6 @@ def _render_user_management_page() -> None:
         firstname = st.text_input("First name", placeholder="e.g. Jane")
         lastname = st.text_input("Last name", placeholder="e.g. Smith")
         username = st.text_input("Username", placeholder="e.g. jane.smith")
-        email = st.text_input("Email", placeholder="e.g. jane@example.com", help="Used for password-reset notifications.")
         password = st.text_input("Password", type="password", placeholder="••••••••")
         confirm = st.text_input("Confirm password", type="password", placeholder="••••••••")
         roles_list = db_auth.get_roles()
@@ -1049,9 +1051,9 @@ def _render_user_management_page() -> None:
         elif db_auth.username_exists(username):
             st.error("That username is already taken.")
         else:
-            ok, err_msg = db_auth.register_user(firstname, lastname, username, password, role_id, store_id, email=(email or "").strip() or None)
+            ok, err_msg = db_auth.register_user(firstname, lastname, username, password, role_id, store_id)
             if ok:
-                st.success(f"User **{username}** created. They can log in with that password. Password-reset emails will go to their email if set.")
+                st.success(f"User **{username}** created. They can log in with that password.")
                 st.rerun()
             else:
                 st.error("Failed to create user.")
@@ -1385,13 +1387,23 @@ Generated SQL:
                         "empty_result_set" if result_df.empty else f"rows_returned={len(result_df)}",
                     )
         except Exception as e:
-            error_text = (
-                "I couldn't process that request safely right now. "
-                "Please rephrase your question and try again."
-            )
+            error_detail = str(e)
+            if "429" in error_detail or "insufficient_quota" in error_detail.lower():
+                error_text = (
+                    "**OpenAI API quota exceeded.** Your API key has hit its usage or billing limit. "
+                    "Check [OpenAI usage and billing](https://platform.openai.com/account/usage) or add payment method. "
+                    "To use chat without OpenAI, remove `OPENAI_API_KEY` from your `.env` — the app will use built-in rules instead."
+                )
+            else:
+                error_text = (
+                    "I couldn't process that request safely right now. "
+                    "Please rephrase your question and try again."
+                )
             st.session_state.chat_history.append({"role": "assistant", "content": error_text})
             with st.chat_message("assistant"):
                 st.error(error_text)
+                with st.expander("Technical details (for debugging)"):
+                    st.code(error_detail, language="text")
             log_event(
                 role,
                 cleaned,
