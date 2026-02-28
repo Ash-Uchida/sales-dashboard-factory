@@ -11,7 +11,7 @@ import plotly.express as px
 import streamlit as st
 from dotenv import load_dotenv
 
-from components.auth import can_access, get_current_role, get_current_user, logout, require_login
+from components.auth import can_access, get_current_role, get_current_store_id, get_current_user, logout, require_login
 
 try:
     from utils import databricks_auth as db_auth
@@ -802,6 +802,12 @@ def _render_add_transaction_page() -> None:
 
     products_list = get_databricks_products()
     store_options = [(s[0], s[1]) for s in get_databricks_stores() if s[0] != "All"]
+    # Business User: only their store
+    _role, _user_store = get_current_role(), get_current_store_id()
+    if _role == "Business User" and _user_store:
+        store_options = [(s[0], s[1]) for s in store_options if s[0] == _user_store]
+        if not store_options:
+            store_options = [(_user_store, f"Your store ({_user_store})")]
     store_names = [s[1] for s in store_options]
     product_names = [p.get("product_name") or "" for p in products_list if p.get("product_name")]
 
@@ -830,8 +836,9 @@ def _render_add_transaction_page() -> None:
 
     with col2:
         if store_names:
-            selected_store_name = st.selectbox("Store", options=store_names, key="tx_store")
-            store_id = next((s[0] for s in store_options if s[1] == selected_store_name), store_names[0] if store_names else None)
+            _disabled = (_role == "Business User" and _user_store and len(store_options) == 1)
+            selected_store_name = st.selectbox("Store", options=store_names, key="tx_store", disabled=_disabled)
+            store_id = next((s[0] for s in store_options if s[1] == selected_store_name), store_options[0][0] if store_options else None)
         else:
             store_id = st.text_input("Store ID", placeholder="e.g. S1", key="tx_store_id")
         customer_id = st.text_input("Customer ID", placeholder="e.g. C001", key="tx_customer")
@@ -878,13 +885,20 @@ def _render_add_customer_page() -> None:
         st.warning("Databricks is not configured. Set .env and connect to save data.")
         return
     store_options = [(s[0], s[1]) for s in get_databricks_stores() if s[0] != "All"]
+    # Business User: only their store
+    _role, _user_store = get_current_role(), get_current_store_id()
+    if _role == "Business User" and _user_store:
+        store_options = [(s[0], s[1]) for s in store_options if s[0] == _user_store]
+        if not store_options:
+            store_options = [(_user_store, f"Your store ({_user_store})")]
     store_names = [s[1] for s in store_options]
     with st.form("add_customer_form"):
         customer_id = st.text_input("Customer ID", placeholder="e.g. C001")
         customer_name = st.text_input("Customer Name", placeholder="e.g. Acme Corp")
         segment = st.text_input("Segment", placeholder="e.g. Enterprise")
         if store_names:
-            selected_store_name = st.selectbox("Store", options=store_names)
+            _disabled_cust = (_role == "Business User" and _user_store and len(store_options) == 1)
+            selected_store_name = st.selectbox("Store", options=store_names, disabled=_disabled_cust)
             store_id = next((s[0] for s in store_options if s[1] == selected_store_name), store_options[0][0] if store_options else "")
         else:
             store_id = st.text_input("Store ID", placeholder="e.g. S1")
@@ -1182,15 +1196,31 @@ def main() -> None:
         max_date = demo_df["order_date"].max().date()
         store_options = get_databricks_stores()
 
-    store_display_names = [s[1] for s in store_options]
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        start_date = st.date_input("Start Date", min_date)
-    with c2:
-        end_date = st.date_input("End Date", max_date)
-    with c3:
-        selected_store_label = st.selectbox("Store", store_display_names)
-        selected_store_id = store_options[store_display_names.index(selected_store_label)][0] if selected_store_label in store_display_names else "All"
+    # Business User: restrict to their assigned store only (row-level access)
+    user_store_id = get_current_store_id()
+    if role == "Business User" and user_store_id:
+        store_options = [(s[0], s[1]) for s in store_options if s[0] == user_store_id]
+        if not store_options:
+            store_options = [(user_store_id, f"Your store ({user_store_id})")]
+        selected_store_id = user_store_id
+        store_display_names = [s[1] for s in store_options]
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            start_date = st.date_input("Start Date", min_date)
+        with c2:
+            end_date = st.date_input("End Date", max_date)
+        with c3:
+            st.selectbox("Store", store_display_names, disabled=True, key="store_bu_locked")
+    else:
+        store_display_names = [s[1] for s in store_options]
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            start_date = st.date_input("Start Date", min_date)
+        with c2:
+            end_date = st.date_input("End Date", max_date)
+        with c3:
+            selected_store_label = st.selectbox("Store", store_display_names)
+            selected_store_id = store_options[store_display_names.index(selected_store_label)][0] if selected_store_label in store_display_names else "All"
 
     if databricks_configured():
         try:
