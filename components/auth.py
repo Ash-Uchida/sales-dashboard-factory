@@ -1,13 +1,18 @@
 """
 Login and role-based page access for Sales Dashboard Factory.
-Demo only: credentials are in-code; use env or secrets in production.
+Uses Databricks workspace.admin (users, roles, stores, auth_view) when configured;
+otherwise falls back to in-code demo users and in-session signups.
 """
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
-# Demo users: username -> { password, role }
-# In production, use environment variables or a secure secrets store.
+try:
+    from utils import databricks_auth as db_auth
+except Exception:
+    db_auth = None
+
+# Demo users when Databricks auth is not configured.
 DEMO_USERS: Dict[str, Dict[str, str]] = {
     "store_manager": {"password": "demo123", "role": "Business User"},
     "analyst": {"password": "demo123", "role": "Data Analyst"},
@@ -51,9 +56,24 @@ def get_current_user() -> Optional[str]:
 
 
 def get_current_role() -> str:
-    """Return current role; defaults to Business User if not logged in (should not happen after require_login)."""
+    """Return current role (role_name); defaults to Business User if not logged in."""
     u = _session_user()
     return u.get("role", "Business User") if u else "Business User"
+
+
+def get_current_firstname() -> str:
+    u = _session_user()
+    return u.get("firstname", "") if u else ""
+
+
+def get_current_lastname() -> str:
+    u = _session_user()
+    return u.get("lastname", "") if u else ""
+
+
+def get_current_store_id() -> Optional[str]:
+    u = _session_user()
+    return u.get("store_id") if u else None
 
 
 def can_access(page: str) -> bool:
@@ -77,8 +97,8 @@ def _set_auth_view(view: str) -> None:
 
 def render_login_form() -> bool:
     """
-    Render login form in the main area. Return True if user is already logged in
-    or just logged in successfully; False otherwise (caller should st.stop()).
+    Render login form. When Databricks auth is configured, uses check_password and auth_view;
+    otherwise uses in-memory demo users.
     """
     if _session_user():
         return True
@@ -91,16 +111,26 @@ def render_login_form() -> bool:
         submitted = st.form_submit_button("Log in")
 
     if submitted and username and password:
-        users = _get_user_store()
-        if username in users and users[username]["password"] == password:
-            st.session_state["auth_user"] = {
-                "username": username,
-                "role": users[username]["role"],
-            }
-            st.success(f"Logged in as **{username}** ({users[username]['role']}).")
-            st.rerun()
-        else:
+        username = username.strip()
+        if db_auth and db_auth.databricks_auth_configured():
+            if db_auth.check_password(username, password):
+                user_info = db_auth.get_user_after_login(username)
+                if user_info:
+                    st.session_state["auth_user"] = user_info
+                    st.success(f"Logged in as **{user_info.get('firstname', '')} {user_info.get('lastname', '')}** ({user_info.get('role', '')}).")
+                    st.rerun()
             st.error("Invalid username or password.")
+        else:
+            users = _get_user_store()
+            if username in users and users[username]["password"] == password:
+                st.session_state["auth_user"] = {
+                    "username": username,
+                    "role": users[username]["role"],
+                }
+                st.success(f"Logged in as **{username}** ({users[username]['role']}).")
+                st.rerun()
+            else:
+                st.error("Invalid username or password.")
 
     st.markdown("---")
     if st.button("Don't have an account? **Sign up**", key="go_signup"):
@@ -110,26 +140,51 @@ def render_login_form() -> bool:
 
 def render_signup_form() -> bool:
     """
-    Render sign-up form. Return True if user is already logged in or just
-    signed up (and logged in); False otherwise.
+    Render sign-up form. When Databricks auth is configured, shows firstname, lastname,
+    username, password, role (from roles table), store (from stores table); otherwise
+    shows simplified demo signup.
     """
     if _session_user():
         return True
 
     st.title("Sales Dashboard Factory")
     st.markdown("Create an account to access the dashboard and analytics.")
+
+    use_databricks = db_auth and db_auth.databricks_auth_configured()
+    roles_list = db_auth.get_roles() if use_databricks else []
+    stores_list = db_auth.get_stores() if use_databricks else []
+    use_db_signup = use_databricks and len(roles_list) > 0
+
     with st.form("signup_form"):
-        username = st.text_input("Username", placeholder="e.g. my_username")
+        firstname = st.text_input("First name", placeholder="e.g. Jane")
+        lastname = st.text_input("Last name", placeholder="e.g. Smith")
+        username = st.text_input("Username", placeholder="e.g. jane.smith")
         password = st.text_input("Password", type="password", placeholder="••••••••")
         confirm = st.text_input("Confirm password", type="password", placeholder="••••••••")
-        role = st.selectbox(
-            "Role",
-            ["Business User", "Data Analyst", "IT Admin"],
-            help="Determines which pages you can access (e.g. Audit Log for Analyst/Admin).",
-        )
+        if use_db_signup:
+            role_options = [r["role_name"] for r in roles_list]
+            role_ids = [r["role_id"] for r in roles_list]
+            role_display = st.selectbox("Role", role_options, help="Determines which pages you can access.")
+            role_id = role_ids[role_options.index(role_display)] if role_display in role_options else role_ids[0]
+        else:
+            role_display = st.selectbox(
+                "Role",
+                ["Business User", "Data Analyst", "IT Admin"],
+                help="Determines which pages you can access.",
+            )
+            role_id = role_display
+        if use_db_signup and stores_list:
+            store_options = ["— None —"] + [s["store_name"] for s in stores_list]
+            store_ids = [None] + [s["store_id"] for s in stores_list]
+            store_display = st.selectbox("Store (optional)", store_options)
+            store_id = store_ids[store_options.index(store_display)] if store_display in store_options else None
+        else:
+            store_id = None
         submitted = st.form_submit_button("Sign up")
 
     if submitted:
+        firstname = (firstname or "").strip()
+        lastname = (lastname or "").strip()
         username = (username or "").strip()
         if not username:
             st.error("Please enter a username.")
@@ -137,13 +192,28 @@ def render_signup_form() -> bool:
             st.error("Please enter a password.")
         elif password != confirm:
             st.error("Passwords do not match.")
+        elif use_db_signup:
+            if db_auth.username_exists(username):
+                st.error("That username is already taken.")
+            else:
+                ok, err_msg = db_auth.register_user(firstname, lastname, username, password, role_id, store_id)
+                if ok:
+                    user_info = db_auth.get_user_after_login(username)
+                    if user_info:
+                        st.session_state["auth_user"] = user_info
+                        st.success(f"Account **{firstname} {lastname}** created. You are now logged in.")
+                        st.rerun()
+                else:
+                    st.error("Registration failed. Check Databricks connection and admin schema.")
+                    if err_msg:
+                        st.code(err_msg, language="text")
         else:
             users = _get_user_store()
             if username in users:
                 st.error("That username is already taken.")
             else:
-                _get_signups()[username] = {"password": password, "role": role}
-                st.session_state["auth_user"] = {"username": username, "role": role}
+                _get_signups()[username] = {"password": password, "role": role_display}
+                st.session_state["auth_user"] = {"username": username, "role": role_display}
                 st.success(f"Account **{username}** created. You are now logged in.")
                 st.rerun()
 
