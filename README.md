@@ -1,6 +1,31 @@
 # Sales Dashboard Factory
 
-Governed analytics app for HackUSU 2026 built with Streamlit + Databricks SQL.
+Governed analytics app for HackUSU 2026 built with Streamlit + Databricks SQL. Implements Data App Factory requirements: governed data access, visual dashboard, conversational interface, steering documents, and governance framework.
+
+## Project Structure
+
+```
+sales-dashboard-factory/
+├── app.py                    # Main application (dashboard, chat, data entry, auth)
+├── requirements.txt           # Python dependencies
+├── .env                       # Environment variables (not committed)
+├── components/
+│   └── auth.py               # Authentication, login, signup, role-based access
+├── governance/
+│   ├── steering_doc.md       # App template documentation and guardrails
+│   ├── guardrails.yaml       # Security policies (SQL rules, limits)
+│   ├── roles.yaml            # User roles and permissions
+│   ├── admin_schema.sql      # Admin schema (users, roles, stores, auth_view)
+│   ├── sales_schema_and_view.sql  # Sales tables and secure view
+│   └── run_in_databricks.sql # Migration and view scripts for Databricks
+├── utils/
+│   ├── databricks_auth.py    # Databricks auth (login, register, password reset)
+│   └── email_sender.py       # Email for password-reset notifications
+├── docs/
+│   ├── ROLE_ACCESS_AND_DATABRICKS.md  # Role matrix and Databricks setup
+│   └── ELEVATION_STRATEGY.md # Demo and differentiation notes
+└── README.md                 # This file
+```
 
 ## Project Goal
 Build a demo-ready app that lets business users:
@@ -48,6 +73,18 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+## Governance & Security (Implemented)
+
+| Control | Who | What |
+|--------|-----|------|
+| **Password / User management** | IT Admin only | Create users, reset passwords, list users (in addition to self-registration via Sign up). Passwords stored as hashes. |
+| **Add Store** | Manager only | Add new stores to the system. |
+| **Audit Log** | Data Analyst, IT Admin | View chat query logs (question, SQL, role, status, outcome). |
+| **Row-level scope** | Business User, Manager | Chat queries scoped to their store; Analyst/Admin see all. |
+| **Table access** | Role-based | Business User/Manager: transactions only; Analyst/Admin: transactions, customers, products. |
+
+See `docs/ROLE_ACCESS_AND_DATABRICKS.md` for full role matrix and Databricks setup.
+
 ## Environment Variables
 Create a local `.env` file (never commit secrets):
 
@@ -57,6 +94,16 @@ DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/xxxxxxxxxxxxxxxx
 DATABRICKS_TOKEN=dapiXXXXXXXXXXXXXXXX
 DATABRICKS_CATALOG=workspace
 DATABRICKS_SCHEMA=sales
+DATABRICKS_SCHEMA_ADMIN=admin
+```
+
+Optional (for password-reset email):
+```env
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+EMAIL_FROM=your-app@example.com
+SMTP_USER=...
+SMTP_PASSWORD=...
 ```
 
 Optional chat mode:
@@ -138,7 +185,9 @@ INSERT INTO workspace.sales.products VALUES
   - generated SQL
   - status (`RECEIVED`, `SUCCESS`, `BLOCKED`, `ERROR`)
   - outcome
-  - audit log view is restricted to `Data Analyst` and `IT Admin`
+  - Audit log view restricted to **Data Analyst** and **IT Admin**
+- User management (create user, reset password) restricted to **IT Admin**
+- Add Store restricted to **Manager**
 
 ## Validator Test Cases
 Use these to verify behavior quickly:

@@ -1,0 +1,78 @@
+# User roles and permissions for Sales Dashboard Factory
+# Aligns with components/auth.py PAGE_ACCESS and steering_doc.md
+
+roles:
+  Business User:
+    role_id: role_business
+    pages:
+      - dashboard
+      - chat
+    data_entry:
+      - Add Transaction
+      - Add Customer
+      - Add Product
+    chat_tables: [transactions]
+    chat_row_limit: 1000
+    store_scoped: true
+    audit_log: false
+    add_store: false
+    user_management: false
+
+  Manager:
+    role_id: role_manager
+    pages:
+      - dashboard
+      - chat
+      - add_store
+    data_entry:
+      - Add Transaction
+      - Add Customer
+      - Add Product
+      - Add Store
+    chat_tables: [transactions]
+    chat_row_limit: 1000
+    store_scoped: true
+    audit_log: false
+    add_store: true
+    user_management: false
+
+  Data Analyst:
+    role_id: role_analyst
+    pages:
+      - dashboard
+      - chat
+      - audit_log
+    data_entry:
+      - Add Transaction
+      - Add Customer
+      - Add Product
+    chat_tables: [transactions, customers, products]
+    chat_row_limit: 100000
+    store_scoped: false
+    audit_log: true
+    add_store: false
+    user_management: false
+
+  IT Admin:
+    role_id: role_admin
+    pages:
+      - dashboard
+      - chat
+      - audit_log
+      - user_management
+    data_entry:
+      - Add Transaction
+      - Add Customer
+      - Add Product
+    chat_tables: [transactions, customers, products]
+    chat_row_limit: 100000
+    store_scoped: false
+    audit_log: true
+    add_store: false
+    user_management: true  # Only IT Admin can create users, reset passwords
+
+# Governance rules (who can do what)
+governance:
+  password_reset: IT Admin only
+  add_store: Manager only
+  audit_log_view: [Data Analyst, IT Admin]

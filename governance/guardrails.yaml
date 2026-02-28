@@ -1,0 +1,65 @@
+# Security policies and guardrails for Sales Dashboard Factory
+# Aligns with steering_doc.md and app validation logic
+
+sql:
+  allowed_operations:
+    - SELECT
+  blocked_keywords:
+    - INSERT
+    - UPDATE
+    - DELETE
+    - DROP
+    - ALTER
+    - TRUNCATE
+    - MERGE
+    - GRANT
+    - REVOKE
+    - CALL
+    - COPY
+  single_statement_only: true
+  no_comments: true  # Block -- and /* */
+
+tables:
+  approved:
+    - workspace.sales.transactions
+    - workspace.sales.customers
+    - workspace.sales.products
+    - main.sales.transactions
+    - main.sales.customers
+    - main.sales.products
+
+row_limits:
+  default: 100000
+  Business User: 1000
+  Manager: 1000
+  Data Analyst: 100000
+  IT Admin: 100000
+
+role_table_access:
+  Business User:
+    - transactions
+  Manager:
+    - transactions
+  Data Analyst:
+    - transactions
+    - customers
+    - products
+  IT Admin:
+    - transactions
+    - customers
+    - products
+
+row_level_security:
+  Business User: store_scoped  # Queries must include store_id filter
+  Manager: store_scoped
+  Data Analyst: all_stores
+  IT Admin: all_stores
+
+audit:
+  log_all_chat_queries: true
+  statuses:
+    - RECEIVED
+    - SUCCESS
+    - BLOCKED
+    - ERROR
+  retain_blocked: true

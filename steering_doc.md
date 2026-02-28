@@ -29,24 +29,33 @@ Data access rules:
 - Query lineage and access controls must remain visible to IT.
 
 ## 3. Role-Based Access Control (RBAC)
-Business User:
+
+**Business User:**
 - Can view KPIs, charts, and filters.
-- Can ask business questions in chat.
+- Can ask business questions in chat (store-scoped, transactions only).
 - Cannot run raw SQL directly.
 - Query scope is restricted to approved transactions-level analytics.
 - Cannot access Audit Log view.
+- Can add transactions, customers, and products.
 
-Data Analyst:
+**Manager:**
+- Same as Business User, plus:
+- **Add Store:** Only Manager can add new stores to the system.
+- Cannot access Audit Log or User management.
+
+**Data Analyst:**
 - Can extend dashboard metrics and visualization logic.
-- Can tune approved analytical queries.
-- Can access Audit Log view for review and QA.
+- Can tune approved analytical queries (all sales tables).
+- **Audit Log:** Can access Audit Log view for review and QA.
 - Cannot modify core governance policy in production.
+- Cannot add stores or manage users/passwords.
 
-IT Admin:
+**IT Admin:**
 - Can review query logs and generated SQL.
+- **Audit Log:** Can access Audit Log view and governance evidence.
+- **User management:** Only IT Admin can create users, reset passwords, and manage accounts.
 - Can disable non-compliant behavior.
 - Can manage access and governance policies.
-- Can access Audit Log view and governance evidence during demo.
 
 ## 4. Application Template Requirements
 Every Sales Dashboard Factory app must include:
@@ -55,7 +64,7 @@ Every Sales Dashboard Factory app must include:
 - Date filter.
 - Region filter.
 - Conversational analytics interface.
-- Query/audit log visibility for authorized roles (Data Analyst, IT Admin).
+- Query/audit log visibility for **Data Analyst** and **IT Admin** only.
 - Optional AI insight summary that can be toggled on/off.
 
 Dashboard standards:
@@ -94,7 +103,27 @@ For operational control and compliance:
 
 This provides traceability and supports responsible AI use.
 
-## 8. Summary
+## 8. Governance & Security Guidelines
+
+### Access Control (Implemented)
+- **Role-Based Access:** Four roles—Business User, Manager, Data Analyst, IT Admin (see Section 3).
+- **Row-Level Security:** Business User and Manager queries are scoped to their store; Data Analyst and IT Admin see all stores.
+- **Audit Logging:** All chat queries (question, SQL, role, status, outcome) are logged. Audit Log view is restricted to **Data Analyst** and **IT Admin** only.
+- **Password Management:** Only **IT Admin** can create users, reset passwords, and access User management. Passwords are stored as hashes; plaintext is never exposed.
+- **Store Management:** Only **Manager** can add new stores via the Add Store page.
+
+### Application Guardrails
+- Template restrictions: SELECT-only SQL; approved tables only.
+- Resource limits: Row limits enforced per role (1K for Business User/Manager, 100K for Analyst/Admin).
+- AI-generated SQL must pass validation before execution.
+- Blocked operations: INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE/MERGE/GRANT/REVOKE in chat.
+
+### IT Oversight
+- Visibility: Audit Log shows all chat activity.
+- Blocked queries are retained for review.
+- IT Admin can inspect activity and intervene when needed.
+
+## 9. Summary
 Sales Dashboard Factory combines:
 - Streamlit application templates,
 - Databricks SQL execution,
