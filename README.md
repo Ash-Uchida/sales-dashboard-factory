@@ -19,8 +19,7 @@ sales-dashboard-factory/
 │   ├── sales_schema_and_view.sql  # Sales tables and secure view
 │   └── run_in_databricks.sql # Migration and view scripts for Databricks
 ├── utils/
-│   ├── databricks_auth.py    # Databricks auth (login, register, password reset)
-│   └── email_sender.py       # Email for password-reset notifications
+│   └── databricks_auth.py    # Databricks auth (login, register, password reset)
 ├── docs/
 │   ├── ROLE_ACCESS_AND_DATABRICKS.md  # Role matrix and Databricks setup
 │   └── ELEVATION_STRATEGY.md # Demo and differentiation notes
@@ -97,14 +96,6 @@ DATABRICKS_SCHEMA=sales
 DATABRICKS_SCHEMA_ADMIN=admin
 ```
 
-Optional (for password-reset email):
-```env
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-EMAIL_FROM=your-app@example.com
-SMTP_USER=...
-SMTP_PASSWORD=...
-```
 
 Optional chat mode:
 - Default is demo-safe execution for reliability.

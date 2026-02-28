@@ -6,20 +6,7 @@
 - **Who can set passwords:** Users can self-register via Sign up on the login page. **IT Admin** can also create users and reset passwords via the **User management** page.
 - **Who can see passwords:** Nobody. Plaintext passwords are never stored. Login only verifies the password (via `check_password` procedure or a hash comparison); the value is never exposed.
 - **First IT Admin:** Create at least one IT Admin user directly in Databricks (e.g. INSERT into `workspace.admin.users` with `role_id = 'role_admin'` and a hashed password), or run a one-time script. After that, that user can log in and create others from User management.
-- **Email:** Users have an optional `email` (stored in `workspace.admin.users`). When an IT Admin resets a user’s password, the new password is emailed to that address if (1) the user has an email on file and (2) SMTP is configured in `.env` (see below).
-
----
-
-## Email / password-reset (SMTP)
-
-To send the new password to the user when IT Admin resets it, set in `.env`:
-
-- `SMTP_HOST` – e.g. `smtp.gmail.com`
-- `SMTP_PORT` – e.g. `587`
-- `EMAIL_FROM` – sender address
-- `SMTP_USER` / `SMTP_PASSWORD` – if your provider requires auth (e.g. Gmail app password)
-
-If these are not set, the password is still reset; the IT Admin must share the new password with the user manually. Registration and User management both collect an optional **Email** field so the user has an email on file for reset.
+- **Password reset:** IT Admin resets passwords via User management and shares the new password with the user manually.
 
 ---
 

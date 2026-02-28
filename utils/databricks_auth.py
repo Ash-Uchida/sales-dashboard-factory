@@ -239,3 +239,33 @@ def register_user(
         return True, None
     except Exception as e:
         return False, str(e)
+
+
+def reset_user_password(username: str, new_password: str) -> Tuple[bool, Optional[str]]:
+    """
+    Update password for an existing user (IT Admin only). Password is hashed before store.
+    Returns (True, None) on success, (False, error_message) on failure.
+    """
+    if not databricks_auth_configured():
+        return False, "Databricks auth not configured (check .env)."
+    safe_user = (username or "").strip().replace("'", "''")
+    if not safe_user:
+        return False, "Username is required."
+    pwd_hash = hash_password(new_password).replace("'", "''")
+    q = f"""
+    UPDATE {_ADMIN_CATALOG}.{_ADMIN_SCHEMA}.users
+    SET password_hash = '{pwd_hash}'
+    WHERE username = '{safe_user}'
+    """
+    try:
+        conn = _conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(q)
+            if hasattr(conn, "commit"):
+                conn.commit()
+        finally:
+            conn.close()
+        return True, None
+    except Exception as e:
+        return False, str(e)

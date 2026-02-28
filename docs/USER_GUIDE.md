@@ -66,7 +66,7 @@ Depending on your role, you can add:
 
 ## Forgot Password?
 
-Contact your **IT Admin**. They can reset your password from the User management page. If your email is on file and the app is configured for email, you’ll receive the new password by email.
+Contact your **IT Admin**. They can reset your password from the User management page and share the new password with you.
 
 ---
 
