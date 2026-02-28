@@ -252,6 +252,28 @@ def render_kpis(df: pd.DataFrame) -> None:
     c5.metric("Units", f"{total_units:,}")
 
 
+def get_insight_bullets(df: pd.DataFrame) -> List[str]:
+    """Generate 2-3 actionable insight bullets from the filtered dataframe (governed data only)."""
+    if df.empty:
+        return ["No data in selected range — adjust date or region filters."]
+    bullets = []
+    by_region = df.groupby("region", as_index=False)["revenue"].sum()
+    if not by_region.empty:
+        top_region = by_region.loc[by_region["revenue"].idxmax()]
+        bullets.append(f"**{top_region['region']}** is the top region by revenue in the selected period (${top_region['revenue']:,.0f}).")
+    by_product = df.groupby("product_name", as_index=False)["revenue"].sum().sort_values("revenue", ascending=False)
+    if len(by_product) >= 2:
+        top2 = by_product.head(2)
+        top2_rev = top2["revenue"].sum()
+        total_rev = df["revenue"].sum()
+        pct = (top2_rev / total_rev * 100) if total_rev else 0
+        names = ", ".join(top2["product_name"].tolist())
+        bullets.append(f"**{names}** drive {pct:.0f}% of revenue; consider promotion in underperforming regions.")
+    aov = df["revenue"].sum() / df["order_id"].nunique() if df["order_id"].nunique() else 0
+    bullets.append(f"Average order value in selection: **${aov:,.2f}** — use chat to compare across regions.")
+    return bullets[:3]
+
+
 def render_charts(df: pd.DataFrame) -> None:
     if df.empty:
         st.warning("No data available for selected filters.")
@@ -331,6 +353,34 @@ def main() -> None:
     st.subheader("KPI Dashboard")
     render_kpis(filtered_df)
     render_charts(filtered_df)
+
+    # Actionable insights (from governed data only; does not bypass SQL validation)
+    insight_bullets = get_insight_bullets(filtered_df)
+    if insight_bullets:
+        with st.expander("AI-generated insights (from this view)", expanded=True):
+            for b in insight_bullets:
+                st.markdown(f"- {b}")
+
+    # Data lineage (governance requirement: demonstrate where data comes from)
+    with st.expander("Where does this data come from?", expanded=False):
+        st.markdown("""
+        **Governed sources (Unity Catalog)**  
+        - **Catalog:** `workspace` · **Schema:** `sales`
+
+        **Tables used for this dashboard:**
+        - `workspace.sales.transactions` — order_id, order_date, region, product_name, quantity, unit_price, revenue, customer_id
+        - `workspace.sales.customers` — customer_id, customer_name, segment, region
+        - `workspace.sales.products` — product_name, category
+
+        **KPI formulas (reproducible):**
+        - **Revenue:** `SUM(revenue)` from transactions, with date and region filters applied.
+        - **Orders:** `COUNT(DISTINCT order_id)` from transactions.
+        - **Customers:** `COUNT(DISTINCT customer_id)` from transactions.
+        - **AOV:** Revenue ÷ Orders.
+        - **Units:** `SUM(quantity)` from transactions.
+
+        All visuals and insights are derived only from these approved tables and filters.
+        """)
 
     st.subheader("Conversational Analytics")
     question = st.text_input("Ask a business question", placeholder="Show top 10 products by revenue in the West region")

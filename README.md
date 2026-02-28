@@ -2,6 +2,10 @@
 
 A Streamlit-based governed analytics app for HackUSU 2026.
 
+## Problem We Solve
+
+Store managers and merchandisers can't wait for IT or analysts to run reports. They need **same-day answers** from the same governed sales data that finance and IT trust—without writing SQL and without seeing data they're not allowed to see. Sales Dashboard Factory gives them one place: a governed dashboard plus natural-language questions, with every query validated and logged so IT keeps full oversight.
+
 ## Quick Start
 ```bash
 python3 -m venv venv
