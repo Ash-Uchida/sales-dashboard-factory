@@ -1,7 +1,7 @@
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -50,6 +50,32 @@ BLOCKED_SQL_PATTERNS = [
 ]
 
 DEFAULT_LIMIT = 100000
+
+ROLE_ALLOWED_TABLES = {
+    "Business User": {
+        "transactions",
+        "main.sales.transactions",
+        "workspace.sales.transactions",
+    },
+    "Data Analyst": {
+        "transactions",
+        "customers",
+        "products",
+        "main.sales.transactions",
+        "main.sales.customers",
+        "main.sales.products",
+        "workspace.sales.transactions",
+        "workspace.sales.customers",
+        "workspace.sales.products",
+    },
+    "IT Admin": APPROVED_TABLES,
+}
+
+ROLE_MAX_LIMIT = {
+    "Business User": 1000,
+    "Data Analyst": 100000,
+    "IT Admin": 100000,
+}
 
 
 @st.cache_data
@@ -108,38 +134,53 @@ def execute_databricks_query(query: str) -> pd.DataFrame:
         conn.close()
 
 
+def normalize_sql(query: str) -> str:
+    return re.sub(r"\s+", " ", query).strip()
+
+
 def extract_table_references(query: str) -> List[str]:
-    refs = re.findall(r"(?:from|join)\s+([\w\.]+)", query, flags=re.IGNORECASE)
-    return [r.lower().strip() for r in refs]
+    # Extract table names after FROM/JOIN, tolerating aliases and quoted identifiers.
+    refs = re.findall(r"(?:from|join)\s+([`\"\w\.\-]+)", query, flags=re.IGNORECASE)
+    cleaned = []
+    for ref in refs:
+        table = ref.strip().strip(",").replace("`", "").replace('"', "").lower()
+        cleaned.append(table)
+    return cleaned
 
 
 def is_single_statement(query: str) -> bool:
     q = query.strip()
     if not q:
         return False
-    if ";" in q[:-1]:
+    # Allow one optional trailing semicolon only.
+    if ";" in re.sub(r";\s*$", "", q):
         return False
     return True
 
 
 def validate_sql(query: str, role: str, selected_region: str) -> Tuple[bool, str, str]:
     raw = query.strip()
-    q = raw.lower()
+    normalized = normalize_sql(raw)
+    q = normalized.lower()
 
-    if not is_single_statement(raw):
+    if not is_single_statement(normalized):
         return False, "Only one SQL statement is allowed.", raw
 
     if not (q.startswith("select") or q.startswith("with")):
         return False, "Only SELECT queries are allowed.", raw
 
+    if "--" in q or "/*" in q or "*/" in q:
+        return False, "SQL comments are not allowed.", raw
+
     for pattern in BLOCKED_SQL_PATTERNS:
         if re.search(pattern, q):
             return False, "This query contains blocked SQL operations.", raw
 
-    refs = extract_table_references(raw)
+    refs = extract_table_references(normalized)
     if not refs:
         return False, "No table reference found. Query must use approved Unity Catalog tables.", raw
 
+    allowed_for_role = ROLE_ALLOWED_TABLES.get(role, APPROVED_TABLES)
     for table in refs:
         if table not in APPROVED_TABLES:
             return (
@@ -147,21 +188,27 @@ def validate_sql(query: str, role: str, selected_region: str) -> Tuple[bool, str
                 f"Table `{table}` is not approved. Allowed tables: transactions, customers, products.",
                 raw,
             )
+        if table not in allowed_for_role:
+            return False, f"Role '{role}' is not allowed to query table `{table}`.", raw
 
     if role == "Business User" and selected_region != "All":
         selected_region_lc = selected_region.lower()
-        if "region" not in q or f"'{selected_region_lc}'" not in q:
+        region_pattern = rf"\bregion\s*=\s*'{re.escape(selected_region_lc)}'"
+        if not re.search(region_pattern, q):
             return False, f"Business User queries must be scoped to region '{selected_region}'.", raw
 
+    role_max_limit = ROLE_MAX_LIMIT.get(role, DEFAULT_LIMIT)
     limit_match = re.search(r"\blimit\s+(\d+)\b", q)
     if limit_match:
         limit_value = int(limit_match.group(1))
-        if limit_value > DEFAULT_LIMIT:
-            return False, f"Query limit exceeds {DEFAULT_LIMIT} rows.", raw
-        return True, "SQL validated.", raw
+        if limit_value <= 0:
+            return False, "Query limit must be greater than 0.", raw
+        if limit_value > role_max_limit:
+            return False, f"Role '{role}' limit is {role_max_limit} rows.", raw
+        return True, "SQL validated.", normalized
 
-    sanitized = raw.rstrip(";") + f" LIMIT {DEFAULT_LIMIT}"
-    return True, "SQL validated. Added default row limit.", sanitized
+    sanitized = normalized.rstrip(";") + f" LIMIT {role_max_limit}"
+    return True, f"SQL validated. Added default row limit ({role_max_limit}).", sanitized
 
 
 def clean_sql_output(text: str) -> str:
@@ -176,6 +223,48 @@ def clean_sql_output(text: str) -> str:
     if ";" in sql[:-1]:
         raise ValueError("Model returned multiple SQL statements; only one is allowed.")
     return sql
+
+
+def explain_unsupported_request(question: str, role: str) -> Optional[str]:
+    q = question.lower()
+    policy_rules = [
+        (
+            r"\b(delete|drop|truncate|alter|update|insert|merge)\b",
+            "I cannot help with data-changing requests. This app only allows read-only analytics queries.",
+        ),
+        (
+            r"(revenue\s*\*\s*\d+|times\s*\d+|multiply.*revenue|inflate.*revenue|fake.*revenue)",
+            "I cannot help manipulate business metrics. This app reports governed data values only.",
+        ),
+        (
+            r"\b(hack|bypass|override|disable guardrail|ignore policy)\b",
+            "I cannot bypass governance controls. Guardrails are required for secure and compliant access.",
+        ),
+    ]
+    for pattern, message in policy_rules:
+        if re.search(pattern, q):
+            return message
+
+    # Role-aware request restrictions with clear user feedback.
+    if role == "Business User":
+        if re.search(r"\b(join|customers?|segment)\b", q):
+            return (
+                "Your current role can query transactions-level analytics only. "
+                "Switch to Data Analyst for customer/product/segment analysis."
+            )
+    # Low-intent / unclear input: prompt user to ask a concrete business query.
+    tokens = re.findall(r"[a-zA-Z]+", q)
+    known_terms = {
+        "sales", "revenue", "region", "product", "products", "customer", "customers",
+        "segment", "trend", "daily", "monthly", "month", "last", "top", "average",
+        "avg", "aov", "order", "orders", "west", "east", "north", "south",
+    }
+    if tokens and not any(t in known_terms for t in tokens):
+        return (
+            "I couldn't map that to a business query. Try a clear request like "
+            "'top 5 products by revenue' or 'last month average revenue'."
+        )
+    return None
 
 
 def llm_to_sql(question: str, selected_region: str) -> str:
@@ -236,6 +325,8 @@ User question:
     base = f"{catalog}.{schema}.transactions"
     is_last_month = "last month" in q or "last months" in q
     is_average = "average" in q or "avg" in q or "mean" in q
+    top_n_match = re.search(r"\btop\s+(\d{1,4})\b", q)
+    top_n = min(max(int(top_n_match.group(1)), 1), 1000) if top_n_match else 10
 
     if is_average and is_last_month:
         return (
@@ -245,11 +336,37 @@ User question:
             f"{region_filter} LIMIT 1"
         )
 
+    if is_last_month and ("revenue" in q or "sales" in q):
+        return (
+            "SELECT SUM(revenue) AS total_revenue "
+            f"FROM {base} "
+            "WHERE DATE_TRUNC('month', order_date) = DATE_TRUNC('month', ADD_MONTHS(CURRENT_DATE(), -1))"
+            f"{region_filter} LIMIT 1"
+        )
+
+    if "customer" in q and "segment" in q:
+        customers_table = f"{catalog}.{schema}.customers"
+        return (
+            "SELECT segment, COUNT(DISTINCT customer_id) AS customers "
+            f"FROM {customers_table} "
+            f"WHERE 1=1{region_filter} "
+            "GROUP BY segment ORDER BY customers DESC LIMIT 1000"
+        )
+
+    if "join" in q and "customer_id" in q:
+        customers_table = f"{catalog}.{schema}.customers"
+        return (
+            "SELECT c.segment, SUM(t.revenue) AS total_revenue "
+            f"FROM {base} t JOIN {customers_table} c ON t.customer_id = c.customer_id "
+            f"WHERE 1=1{region_filter} "
+            "GROUP BY c.segment ORDER BY total_revenue DESC LIMIT 1000"
+        )
+
     if "top" in q and "product" in q:
         return (
             "SELECT product_name, SUM(revenue) AS total_revenue "
             f"FROM {base} WHERE 1=1{region_filter} "
-            "GROUP BY product_name ORDER BY total_revenue DESC LIMIT 10"
+            f"GROUP BY product_name ORDER BY total_revenue DESC LIMIT {top_n}"
         )
 
     if "trend" in q or "over time" in q or "daily" in q:
@@ -350,7 +467,7 @@ def log_event(
     outcome: str,
 ) -> None:
     entry = {
-        "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         "role": role,
         "question": question,
         "sql": sql,
@@ -360,8 +477,6 @@ def log_event(
     logs = st.session_state.setdefault("audit_logs", [])
     logs.insert(0, entry)
     st.session_state["audit_logs"] = logs
-    st.session_state["last_audit_status"] = f"{status}: {outcome}"
-    print(f"[AUDIT] {entry['timestamp']} status={status} outcome={outcome} question={question}")
 
 
 def main() -> None:
@@ -419,7 +534,6 @@ def main() -> None:
         st.subheader("Audit Log")
         logs = pd.DataFrame(st.session_state.get("audit_logs", []))
         st.caption(f"Entries: {len(logs)}")
-        st.caption(f"Last status: {st.session_state.get('last_audit_status', 'none')}")
         if logs.empty:
             st.info("No queries logged yet.")
         else:
@@ -496,7 +610,6 @@ def main() -> None:
         st.session_state.chat_history.append({"role": "user", "content": cleaned})
         with st.chat_message("user"):
             st.markdown(cleaned)
-        before_count = len(st.session_state["audit_logs"])
         log_event(
             role,
             cleaned,
@@ -504,18 +617,28 @@ def main() -> None:
             "RECEIVED",
             "question_received",
         )
-        after_count = len(st.session_state["audit_logs"])
-        st.session_state["last_audit_status"] = f"RECEIVED debug: {before_count}->{after_count}"
+
+        unsupported_reason = explain_unsupported_request(cleaned, role)
+        if unsupported_reason:
+            st.session_state.chat_history.append({"role": "assistant", "content": unsupported_reason})
+            with st.chat_message("assistant"):
+                st.warning(unsupported_reason)
+            log_event(
+                role,
+                cleaned,
+                "N/A",
+                "BLOCKED",
+                "policy_or_role_restriction",
+            )
+            return
 
         try:
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
                     time.sleep(1.2)
 
-            # Question -> SQL
             generated_sql = llm_to_sql(cleaned, selected_region)
 
-            # SQL -> Validate
             ok, message, safe_sql = validate_sql(generated_sql, role, selected_region)
             if not ok:
                 blocked_text = f"""I blocked this query for safety.
@@ -548,18 +671,15 @@ Generated SQL:
                 with st.chat_message("assistant"):
                     st.markdown(assistant_text)
 
-                # Validate -> Execute
                 if databricks_configured():
                     result_df = execute_databricks_query(safe_sql)
                 else:
                     result_df = filtered_df.head(200)
 
-                # Execute -> UI
                 with st.chat_message("assistant"):
                     st.markdown("Query results:")
                     st.dataframe(result_df, use_container_width=True)
 
-                    # Optional chart when result shape is chart-compatible.
                     numeric_cols = result_df.select_dtypes(include="number").columns
                     non_numeric_cols = [c for c in result_df.columns if c not in numeric_cols]
                     if len(numeric_cols) >= 1 and len(non_numeric_cols) >= 1:
@@ -586,17 +706,16 @@ Generated SQL:
             st.session_state.chat_history.append({"role": "assistant", "content": error_text})
             with st.chat_message("assistant"):
                 st.error(error_text)
-                st.caption(f"Debug detail: {e}")
             log_event(
                 role,
                 cleaned,
                 "N/A",
                 "ERROR",
-                "malformed output or execution failure",
+                f"malformed output or execution failure: {e}",
             )
     if can_access("audit_log"):
         with st.expander("Audit Log"):
-            logs = pd.DataFrame(st.session_state.audit_logs)
+            logs = pd.DataFrame(st.session_state.get("audit_logs", []))
             if logs.empty:
                 st.write("No queries logged yet.")
             else:
