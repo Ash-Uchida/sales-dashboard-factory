@@ -1,12 +1,30 @@
 # Sales Dashboard Factory
 
-A Streamlit-based governed analytics app for HackUSU 2026.
+Governed analytics app for HackUSU 2026 built with Streamlit + Databricks SQL.
 
-## Problem We Solve
+## Project Goal
+Build a demo-ready app that lets business users:
+- View KPI dashboard and charts
+- Ask natural-language sales questions
+- Get governed SQL + results
+- Keep IT oversight through audit logs and guardrails
 
-Store managers and merchandisers can't wait for IT or analysts to run reports. They need **same-day answers** from the same governed sales data that finance and IT trust—without writing SQL and without seeing data they're not allowed to see. Sales Dashboard Factory gives them one place: a governed dashboard plus natural-language questions, with every query validated and logged so IT keeps full oversight.
+## Stack
+- Streamlit
+- Databricks SQL Connector
+- Pandas
+- Plotly
+- Python Dotenv
+- OpenAI (optional)
+
+## Team Roles
+- A (Data + Dashboard): KPIs, filters, charts, Databricks connection
+- B (AI + Validation): NL-to-SQL, SQL validation, chat flow
+- C (Governance + Demo): steering doc, audit/log UX, demo script
 
 ## Quick Start
+
+### macOS / Linux
 ```bash
 python3 -m venv venv
 source venv/bin/activate
@@ -14,18 +32,44 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+### Windows (PowerShell)
+```powershell
+py -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+### Windows (Command Prompt)
+```bat
+py -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+streamlit run app.py
+```
+
 ## Environment Variables
-Create `.env` (local only, do not commit):
+Create a local `.env` file (never commit secrets):
 
 ```env
-DATABRICKS_SERVER_HOSTNAME=dbc-<workspace-hostname>
-DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/<warehouse-id>
-DATABRICKS_TOKEN=<personal-access-token>
+DATABRICKS_SERVER_HOSTNAME=dbc-xxxxxxxx.cloud.databricks.com
+DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/xxxxxxxxxxxxxxxx
+DATABRICKS_TOKEN=dapiXXXXXXXXXXXXXXXX
 DATABRICKS_CATALOG=workspace
 DATABRICKS_SCHEMA=sales
 ```
 
-## Data Setup (Databricks SQL Editor)
+Optional chat mode:
+- Default is demo-safe execution for reliability.
+- To force live Databricks chat execution:
+
+```bash
+export CHAT_EXECUTION_MODE=databricks
+```
+
+## Databricks SQL Setup
+Run in SQL Editor:
+
 ```sql
 CREATE SCHEMA IF NOT EXISTS workspace.sales;
 
@@ -53,26 +97,136 @@ CREATE TABLE IF NOT EXISTS workspace.sales.products (
 );
 ```
 
-## 5-Minute Demo Outline
-1. Problem (30s)
-- Business users need fast answers from governed data without writing SQL.
+Seed sample data:
 
-2. Dashboard Walkthrough (90s)
-- Show KPIs, date/region filters, and core charts.
-- Confirm insights update from filtered data.
+```sql
+INSERT INTO workspace.sales.transactions VALUES
+('O1001','2026-01-05','West','Alpha',3,100,300,'C001'),
+('O1002','2026-01-06','East','Beta',2,120,240,'C002'),
+('O1003','2026-01-07','North','Gamma',5,80,400,'C003'),
+('O1004','2026-01-08','South','Alpha',4,100,400,'C004');
 
-3. AI Chat Demo (90s)
-- Ask a business question in natural language.
-- Show generated SQL and returned result.
+INSERT INTO workspace.sales.customers VALUES
+('C001','Acme Co','SMB','West'),
+('C002','Bright Inc','Enterprise','East'),
+('C003','Northwind','SMB','North'),
+('C004','Sunrise LLC','Mid-Market','South');
 
-4. Governance Controls (60s)
-- Explain approved tables, SELECT-only validation, row limit guardrails, and blocked unsafe SQL.
-- Show audit log for traceability.
+INSERT INTO workspace.sales.products VALUES
+('Alpha','Core'),
+('Beta','Addon'),
+('Gamma','Core');
+```
 
-5. Close (30s)
-- "We empower non-technical users while maintaining IT oversight through governed, auditable SQL workflows."
+## What the App Includes
+- 5 KPIs: Revenue, Orders, Customers, AOV, Units
+- Core charts: Revenue trend, Revenue by region, Product mix
+- Filters: Date range and region
+- Conversational analytics: question -> SQL -> validate -> execute/render
+- SQL guardrails:
+  - SELECT-only
+  - Approved table allowlist
+  - Dangerous keyword blocking
+  - Row-limit enforcement
+  - Role-aware table restrictions
+- Audit logging for chat actions:
+  - timestamp
+  - role
+  - question
+  - generated SQL
+  - status (`RECEIVED`, `SUCCESS`, `BLOCKED`, `ERROR`)
+  - outcome
 
-## Team Roles
-- Person A: Data + dashboard
-- Person B: AI + validation
-- Person C: Governance + demo
+## Validator Test Cases
+Use these to verify behavior quickly:
+
+1. `revenue by region` -> `SUCCESS`
+2. `top 5 products by revenue` -> `SUCCESS`
+3. `what was last month's average revenue` -> `SUCCESS`
+4. `delete my data` -> `BLOCKED`
+5. (Business User) `show customer count by segment` -> `BLOCKED`
+6. (Data Analyst) `show customer count by segment` -> `SUCCESS`
+7. `mello mello helo jello` -> clarification/block
+8. query with excessive limit request -> capped/blocked per rules
+9. non-approved table reference -> `BLOCKED`
+10. multi-statement input -> `BLOCKED`
+
+## Demo Script (5 Minutes)
+1. Problem: Business users need governed self-service analytics.
+2. Dashboard: KPIs, filters, and charts.
+3. Chat: Ask a natural-language question, show generated SQL and result.
+4. Governance: Show blocked unsafe request + audit log entry.
+5. Close: "We empower non-technical users while maintaining IT oversight through validated, auditable SQL workflows."
+
+## Security Notes
+- Do not commit `.env` or tokens.
+- Each teammate uses their own local token.
+- Rotate token immediately if exposed.
+
+## Troubleshooting
+
+### `streamlit: command not found`
+Your virtual environment is not active.
+
+macOS/Linux:
+```bash
+source venv/bin/activate
+streamlit run app.py
+```
+
+Windows (PowerShell):
+```powershell
+.\\venv\\Scripts\\Activate.ps1
+streamlit run app.py
+```
+
+### Warehouse pauses / query feels stuck
+Databricks Free Edition warehouse auto-stops after inactivity.
+- Go to Databricks SQL Warehouses
+- Start `Serverless Starter Warehouse`
+- Run a simple warm-up query in SQL Editor:
+```sql
+SELECT 1;
+```
+
+### Chat shows SQL but no Databricks result
+Use reliable demo-safe mode (default), or explicitly choose mode:
+
+```bash
+# reliable demo behavior (default)
+unset CHAT_EXECUTION_MODE
+
+# force live Databricks execution
+export CHAT_EXECUTION_MODE=databricks
+```
+
+If live mode is unstable, switch back to demo-safe mode for presentation reliability.
+
+### `.env` values not loading
+Check required keys are present:
+- `DATABRICKS_SERVER_HOSTNAME`
+- `DATABRICKS_HTTP_PATH`
+- `DATABRICKS_TOKEN`
+- `DATABRICKS_CATALOG`
+- `DATABRICKS_SCHEMA`
+
+Quick check:
+```bash
+python -c "from dotenv import load_dotenv; load_dotenv(); import os; print(os.getenv('DATABRICKS_SERVER_HOSTNAME')); print(os.getenv('DATABRICKS_HTTP_PATH')); print(os.getenv('DATABRICKS_CATALOG')); print(os.getenv('DATABRICKS_SCHEMA'))"
+```
+
+### Token/auth errors
+- Generate a new Databricks personal access token.
+- Update local `.env`.
+- Restart Streamlit app.
+
+### Audit log not visible
+By design, Audit Log is visible only for `Data Analyst` and `IT Admin` roles.
+
+## Repo Workflow
+```bash
+git checkout -b codex/<feature-name>
+git add .
+git commit -m "<message>"
+git push -u origin codex/<feature-name>
+```

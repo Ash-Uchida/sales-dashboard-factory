@@ -580,12 +580,16 @@ def main() -> None:
         st.caption("View")
         if st.button("Dashboard", use_container_width=True):
             st.session_state["view_mode"] = "Dashboard"
-        if st.button("Audit Log", use_container_width=True):
-            st.session_state["view_mode"] = "Audit Log"
+        if can_access("audit_log"):
+            if st.button("Audit Log", use_container_width=True):
+                st.session_state["view_mode"] = "Audit Log"
+        elif st.session_state.get("view_mode") == "Audit Log":
+            st.session_state["view_mode"] = "Dashboard"
         view = st.session_state["view_mode"]
         st.caption(f"Current: {view}")
         mode = "Databricks SQL" if databricks_configured() else "Demo Data (no Databricks env configured)"
         st.caption(f"Execution: {mode}")
+        show_insights = st.checkbox("Show AI Insights", value=True)
 
     if view == "Audit Log":
         st.subheader("Audit Log")
@@ -625,7 +629,7 @@ def main() -> None:
 
     # Actionable insights (from governed data only; does not bypass SQL validation)
     insight_bullets = get_insight_bullets(filtered_df)
-    if insight_bullets:
+    if show_insights and insight_bullets:
         with st.expander("AI-generated insights (from this view)", expanded=True):
             for b in insight_bullets:
                 st.markdown(f"- {b}")
@@ -761,18 +765,24 @@ Generated SQL:
 
                 with st.chat_message("assistant"):
                     st.markdown("Query results:")
-                    st.dataframe(result_df, use_container_width=True)
-
-                    numeric_cols = result_df.select_dtypes(include="number").columns
-                    non_numeric_cols = [c for c in result_df.columns if c not in numeric_cols]
-                    if len(numeric_cols) >= 1 and len(non_numeric_cols) >= 1:
-                        fig = px.bar(
-                            result_df.head(20),
-                            x=non_numeric_cols[0],
-                            y=numeric_cols[0],
-                            title="Query Result Snapshot",
+                    if result_df.empty:
+                        st.info(
+                            "No rows returned for this query with current filters. "
+                            "Try changing date range, region, or question."
                         )
-                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.dataframe(result_df, use_container_width=True)
+
+                        numeric_cols = result_df.select_dtypes(include="number").columns
+                        non_numeric_cols = [c for c in result_df.columns if c not in numeric_cols]
+                        if len(numeric_cols) >= 1 and len(non_numeric_cols) >= 1:
+                            fig = px.bar(
+                                result_df.head(20),
+                                x=non_numeric_cols[0],
+                                y=numeric_cols[0],
+                                title="Query Result Snapshot",
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
 
                 existing = st.session_state.get("audit_logs", [])
                 already_logged_fallback = (
@@ -787,7 +797,7 @@ Generated SQL:
                         cleaned,
                         safe_sql,
                         "SUCCESS",
-                        f"rows_returned={len(result_df)}",
+                        "empty_result_set" if result_df.empty else f"rows_returned={len(result_df)}",
                     )
         except Exception as e:
             error_text = (
