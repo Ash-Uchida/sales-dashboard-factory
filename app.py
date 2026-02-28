@@ -1,5 +1,6 @@
 import os
 import re
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -146,8 +147,9 @@ def validate_sql(query: str, role: str, selected_region: str) -> Tuple[bool, str
             )
 
     if role == "Business User" and selected_region != "All":
-        if "region" not in q:
-            return False, "Business User queries must include region scoping.", raw
+        selected_region_lc = selected_region.lower()
+        if "region" not in q or f"'{selected_region_lc}'" not in q:
+            return False, f"Business User queries must be scoped to region '{selected_region}'.", raw
 
     limit_match = re.search(r"\blimit\s+(\d+)\b", q)
     if limit_match:
@@ -165,6 +167,11 @@ def llm_to_sql(question: str, selected_region: str) -> str:
     schema = os.getenv("DATABRICKS_SCHEMA", "sales")
     region_filter = (
         f" and region = '{selected_region}'" if selected_region and selected_region != "All" else ""
+    )
+    selected_region_rule = (
+        f"- selected_region is '{selected_region}'. You must include `region = '{selected_region}'` in SQL."
+        if selected_region and selected_region != "All"
+        else "- selected_region is 'All'. Do not force a specific region filter unless user asks."
     )
 
     if OpenAI is not None and os.getenv("OPENAI_API_KEY"):
@@ -184,8 +191,8 @@ Rules:
 - Never use INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, MERGE, GRANT, REVOKE.
 - Always include LIMIT 1000 or less.
 - Prefer simple, readable SQL.
-- If the question needs a region and one is provided, include:
-  region = '{selected_region}'
+- Respect selected region context:
+{selected_region_rule}
 - If the question is ambiguous, return a safe aggregate query from transactions.
 
 User question:
@@ -215,7 +222,7 @@ User question:
         return (
             "SELECT DATE(order_date) AS day, SUM(revenue) AS total_revenue "
             f"FROM {base} WHERE 1=1{region_filter} "
-            "GROUP BY DATE(order_date) ORDER BY day LIMIT 100000"
+            "GROUP BY DATE(order_date) ORDER BY day LIMIT 1000"
         )
 
     if "average" in q or "aov" in q:
@@ -226,7 +233,7 @@ User question:
 
     return (
         "SELECT region, SUM(revenue) AS total_revenue, COUNT(DISTINCT customer_id) AS customers "
-        f"FROM {base} WHERE 1=1{region_filter} GROUP BY region LIMIT 100000"
+        f"FROM {base} WHERE 1=1{region_filter} GROUP BY region LIMIT 1000"
     )
 
 
@@ -302,6 +309,8 @@ def main() -> None:
 
     if "audit_logs" not in st.session_state:
         st.session_state.audit_logs = []
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
 
     with st.sidebar:
         st.subheader("Access Context")
@@ -333,41 +342,34 @@ def main() -> None:
     render_charts(filtered_df)
 
     st.subheader("Conversational Analytics")
-    question = st.text_input("Ask a business question", placeholder="Show top 10 products by revenue in the West region")
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-    if st.button("Generate Answer", type="primary"):
-        if not question.strip():
-            st.warning("Enter a question first.")
-        else:
-            generated_sql = llm_to_sql(question, selected_region)
-            ok, message, safe_sql = validate_sql(generated_sql, role, selected_region)
+    user_question = st.chat_input("Ask about sales...")
+    if user_question:
+        st.session_state.chat_history.append({"role": "user", "content": user_question})
+        with st.chat_message("user"):
+            st.markdown(user_question)
 
-            st.markdown("**Generated SQL**")
-            st.code(safe_sql if ok else generated_sql, language="sql")
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                time.sleep(2)
 
-            if not ok:
-                st.error(message)
-                log_event(st.session_state.audit_logs, role, question, generated_sql, f"BLOCKED: {message}")
-            else:
-                try:
-                    if databricks_configured():
-                        result_df = execute_databricks_query(safe_sql)
-                    else:
-                        result_df = pd.read_sql_query(safe_sql, con=None)
-                except Exception:
-                    # Streamlit demo fallback: if not connected to Databricks, use synthetic data-driven answers.
-                    result_df = filtered_df.head(200)
+        placeholder_text = "I can help with sales trends, regions, top products, and KPIs. Generating SQL..."
+        st.session_state.chat_history.append({"role": "assistant", "content": placeholder_text})
+        with st.chat_message("assistant"):
+            st.markdown(placeholder_text)
 
-                st.success(message)
-                st.dataframe(result_df, use_container_width=True)
-                if not result_df.empty:
-                    numeric_cols = result_df.select_dtypes(include="number").columns
-                    if len(numeric_cols) >= 1:
-                        chart_col = numeric_cols[0]
-                        if "region" in result_df.columns:
-                            fig = px.bar(result_df.head(20), x="region", y=chart_col, title="Query Result Snapshot")
-                            st.plotly_chart(fig, use_container_width=True)
-                log_event(st.session_state.audit_logs, role, question, safe_sql, "SUCCESS")
+        # Stub only for Hour 1: generate SQL and display it without execution.
+        generated_sql = llm_to_sql(user_question, selected_region)
+        assistant_text = f"""Stub SQL generated:
+```sql
+{generated_sql}
+```"""
+        st.session_state.chat_history.append({"role": "assistant", "content": assistant_text})
+        with st.chat_message("assistant"):
+            st.markdown(assistant_text)
 
     with st.expander("Audit Log"):
         logs = pd.DataFrame(st.session_state.audit_logs)
