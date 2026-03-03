@@ -174,7 +174,7 @@ def render_signup_form() -> bool:
         else:
             role_display = st.selectbox(
                 "Role",
-                ["Business User", "Data Analyst", "IT Admin"],
+                ["Business User", "Manager", "Data Analyst", "IT Admin"],
                 help="Determines which pages you can access.",
             )
             role_id = role_display

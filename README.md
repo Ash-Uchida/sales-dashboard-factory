@@ -76,7 +76,7 @@ streamlit run app.py
 
 | Control | Who | What |
 |--------|-----|------|
-| **Password / User management** | IT Admin only | Create users, reset passwords, list users (in addition to self-registration via Sign up). Passwords stored as hashes. |
+| **Password / User management** | IT Admin only | Create users (role + store), reset passwords, list users. Assign Business Users a store for store-only access. Passwords stored as hashes. |
 | **Add Store** | Manager only | Add new stores to the system. |
 | **Audit Log** | Data Analyst, IT Admin | View chat query logs (question, SQL, role, status, outcome). |
 | **Row-level scope** | Business User, Manager | Chat queries scoped to their store; Analyst/Admin see all. |
