@@ -55,6 +55,9 @@ roles:
 
   IT Admin:
     role_id: role_admin
+    description: |
+      Create and manage user accounts; reset passwords; assign roles and stores (e.g. Business User + store for row-level access).
+      Review Audit Log for compliance and support. Full dashboard/chat access (all stores). Does not add stores (Manager only).
     pages:
       - dashboard
       - chat
@@ -69,7 +72,7 @@ roles:
     store_scoped: false
     audit_log: true
     add_store: false
-    user_management: true  # Only IT Admin can create users, reset passwords
+    user_management: true
 
 # Governance rules (who can do what)
 governance:

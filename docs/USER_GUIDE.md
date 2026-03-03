@@ -64,6 +64,21 @@ Depending on your role, you can add:
 
 ---
 
+## IT Admin: What you do
+
+If your role is **IT Admin**, you are responsible for:
+
+1. **User management** (sidebar → User management)
+   - **Create accounts** for new employees: set username, password, role (Business User, Manager, Data Analyst, or IT Admin), and optional store. For **Business User**, assign a store so they only see that store's data.
+   - **Reset passwords** when users forget them: open the "Reset password" section, select the user, set a new password, and share it with them securely.
+   - **List users** to see who has access and fix roles or stores if needed.
+2. **Audit Log** (sidebar → Audit Log)
+   - Review chat activity: who asked what, which SQL ran, and whether it succeeded or was blocked. Use this for compliance and support.
+3. **Dashboard and chat**
+   - You can view all stores and run analytics like a Data Analyst. You do not add new stores (that is the **Manager** role).
+
+---
+
 ## Forgot Password?
 
 Contact your **IT Admin**. They can reset your password from the User management page and share the new password with you.

@@ -50,12 +50,13 @@ Data access rules:
 - Cannot modify core governance policy in production.
 - Cannot add stores or manage users/passwords.
 
-**IT Admin:**
-- Can review query logs and generated SQL.
-- **Audit Log:** Can access Audit Log view and governance evidence.
-- **User management:** Only IT Admin can create users, reset passwords, and manage accounts.
-- Can disable non-compliant behavior.
-- Can manage access and governance policies.
+**IT Admin (clear responsibilities):**
+- **User management (IT Admin only):**
+  - Create new user accounts (username, password, role, optional store). Assign Business Users a store so they only see that store's data.
+  - Reset passwords when users forget them; share the new password with the user securely.
+  - List and review users to maintain correct roles and store assignments.
+- **Audit Log:** Access the Audit Log to review chat queries, blocked requests, and errors for compliance and support.
+- **Governance:** Can review query logs and generated SQL; can manage access and intervene when needed. Does not add stores (that is the Manager role).
 
 ## 4. Application Template Requirements
 Every Sales Dashboard Factory app must include:
